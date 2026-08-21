@@ -1,35 +1,36 @@
 #!/usr/bin/env bash
-# team — delegate work to other agentic CLIs (Codex, Antigravity, opencode, ...)
-# and bring the result back as a reviewable patch.
+# team — run the other AIs as an actual team: they work in parallel, leave each
+# other notes, review each other's patches, and step aside when their quota ends.
 #
-#   team doctor                 who is installed and signed in
-#   team agents                 the roster and what each one is good at
-#   team ask <agent> <prompt>   read-only question, no files touched
-#   team panel <prompt>         same question to every available agent
-#   team run <agent> <prompt>   real task, isolated git worktree, patch out
-#   team runs | show | diff | apply | drop | wait
+# The lead (Claude, or whoever runs this) writes the brief and reviews the diff.
+# No agent commits, no agent pushes.
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 TEAM_HOME="${IA_TEAM_HOME:-$HOME/.ia-team}"
 RUNS_DIR="$TEAM_HOME/runs"
 WT_DIR="$TEAM_HOME/worktrees"
+STATE_DIR="$TEAM_HOME/state"
+BOARD_DIR="$TEAM_HOME/boards"
+QUOTA_FILE="$STATE_DIR/quota.json"
+SUGGEST_FILE="$STATE_DIR/suggest.json"
 
 SELF="${BASH_SOURCE[0]}"
 while [ -L "$SELF" ]; do SELF="$(readlink "$SELF")"; done
 SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+REPO_ROOT="$(cd "$SELF_DIR/.." && pwd)"
 
-# Adapters live next to the clone when running from one, in TEAM_HOME once installed.
 ADAPTER_DIRS=()
-[ -d "$SELF_DIR/../agents" ] && ADAPTER_DIRS+=("$(cd "$SELF_DIR/.." && pwd)/agents")
+[ -d "$REPO_ROOT/agents" ] && ADAPTER_DIRS+=("$REPO_ROOT/agents")
 [ -d "$TEAM_HOME/agents" ] && ADAPTER_DIRS+=("$TEAM_HOME/agents")
+if [ -d "$TEAM_HOME/lib" ]; then TEAM_LIB="$TEAM_HOME/lib"; else TEAM_LIB="$REPO_ROOT/lib"; fi
+if [ -f "$TEAM_HOME/lib/port_install.py" ]; then TEAM_PORT_HELPER="$TEAM_HOME/lib/port_install.py"
+else TEAM_PORT_HELPER="$REPO_ROOT/lib/port_install.py"; fi
+export TEAM_LIB TEAM_HOME TEAM_PORT_HELPER
 
-# ---------------------------------------------------------------- output ----
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
-  B=$'\033[1m'; DIM=$'\033[2m'; RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; RST=$'\033[0m'
-else
-  B=""; DIM=""; RED=""; GRN=""; YEL=""; RST=""
-fi
+  B=$'\033[1m'; DIM=$'\033[2m'; RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; CYN=$'\033[36m'; RST=$'\033[0m'
+else B=""; DIM=""; RED=""; GRN=""; YEL=""; CYN=""; RST=""; fi
 say()  { printf '%s\n' "$*"; }
 warn() { printf '%s\n' "${YEL}$*${RST}" >&2; }
 die()  { printf '%s\n' "${RED}error:${RST} $*" >&2; exit 1; }
@@ -37,50 +38,82 @@ die()  { printf '%s\n' "${RED}error:${RST} $*" >&2; exit 1; }
 # --------------------------------------------------------------- adapters ---
 adapter_file() {
   local id="$1" d
-  for d in "${ADAPTER_DIRS[@]:-}"; do
-    [ -f "$d/$id.sh" ] && { printf '%s\n' "$d/$id.sh"; return 0; }
-  done
+  for d in "${ADAPTER_DIRS[@]:-}"; do [ -f "$d/$id.sh" ] && { printf '%s\n' "$d/$id.sh"; return 0; }; done
   return 1
 }
-
 adapter_ids() {
   local d f
   for d in "${ADAPTER_DIRS[@]:-}"; do
-    for f in "$d"/*.sh; do
-      [ -e "$f" ] || continue
-      basename "$f" .sh
-    done
+    for f in "$d"/*.sh; do [ -e "$f" ] || continue; basename "$f" .sh; done
   done | sort -u
 }
-
-# meta <id> <VAR> -> prints the adapter's variable without polluting this shell
 meta() {
   local id="$1" var="$2" file
   file="$(adapter_file "$id")" || return 1
-  ( set +u; . "$file"; printf '%s\n' "${!var:-}" )
+  ( set +u; . "$file" >/dev/null 2>&1; printf '%s\n' "${!var:-}" )
 }
-
-probe() { # prints "ok|<detail>", "noauth|<detail>" or "missing|<detail>"
+raw_probe() {
   local id="$1" file
   file="$(adapter_file "$id")" || { printf 'missing|no adapter\n'; return; }
-  ( set +u; . "$file"; adapter_probe )
+  ( set +u; . "$file" >/dev/null 2>&1; adapter_probe )
+}
+# probe() is raw_probe plus what we know about quota. Probing costs a process
+# spawn per agent (some CLIs take a second to answer --version), so the answer
+# is cached briefly — a sprint asks about everyone several times.
+PROBE_TTL="${TEAM_PROBE_TTL:-90}"
+probe() {
+  local id="$1" left cache age
+  left="$(quota_left "$id")"
+  if [ "$left" -gt 0 ] 2>/dev/null; then
+    printf 'cooldown|out of quota, back in %s\n' "$(human_time "$left")"
+    return
+  fi
+  cache="$STATE_DIR/probe/$id"
+  if [ -f "$cache" ]; then
+    age=$(( $(now) - $(stat -f %m "$cache" 2>/dev/null || stat -c %Y "$cache" 2>/dev/null || echo 0) ))
+    if [ "$age" -lt "$PROBE_TTL" ]; then cat "$cache"; return; fi
+  fi
+  mkdir -p "$STATE_DIR/probe"
+  raw_probe "$id" | tee "$cache"
+}
+ready_agents() {
+  local a st
+  for a in $(adapter_ids); do
+    st="$(probe "$a")"
+    if [ "${st%%|*}" = "ok" ]; then printf '%s\n' "$a"; fi
+  done
+  return 0
 }
 
 # ------------------------------------------------------------------ utils ---
-now_id() { printf '%s-%s' "$1" "$(date +%Y%m%d-%H%M%S)"; }
+now()      { date +%s; }
+now_id()   { printf '%s-%s' "$1" "$(date +%Y%m%d-%H%M%S)-$RANDOM"; }
+git_root() { git -C "$1" rev-parse --show-toplevel 2>/dev/null; }
+human_time() {
+  local s="$1"
+  if [ "$s" -ge 3600 ]; then printf '%dh%02dm' $((s/3600)) $(((s%3600)/60));
+  elif [ "$s" -ge 60 ]; then printf '%dm' $((s/60)); else printf '%ds' "$s"; fi
+}
+slugify() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//'; }
 
 run_limited() { # run_limited <seconds> <logfile> <command...>
   local secs="$1" log="$2"; shift 2
-  set +m   # no "Terminated" chatter when we time an agent out
-  ( "$@" >"$log" 2>&1 ) &
+  run_limited_split "$secs" "$log" "$log" "$@"
+}
+
+# Same, but keeping the two streams apart: every adapter prints its final
+# report on stdout and its step-by-step noise on stderr, so the board and the
+# summary can quote the report instead of the log.
+run_limited_split() { # <seconds> <out> <err> <command...>
+  local secs="$1" out="$2" err="$3"; shift 3
+  set +m
+  if [ "$out" = "$err" ]; then ( "$@" >"$out" 2>&1 ) & else ( "$@" >"$out" 2>"$err" ) & fi
   local pid=$! waited=0 rc=0
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$waited" -ge "$secs" ]; then
-      kill -TERM "$pid" 2>/dev/null || true
-      sleep 2
-      kill -KILL "$pid" 2>/dev/null || true
+      kill -TERM "$pid" 2>/dev/null || true; sleep 2; kill -KILL "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
-      printf '\n[team] gave up after %ss\n' "$secs" >>"$log"
+      printf '\n[team] gave up after %ss\n' "$secs" >>"$err"
       return 124
     fi
     sleep 1; waited=$((waited + 1))
@@ -89,28 +122,130 @@ run_limited() { # run_limited <seconds> <logfile> <command...>
   return $rc
 }
 
-git_root() { git -C "$1" rev-parse --show-toplevel 2>/dev/null; }
-
-json_meta() { # json_meta <file> key value key value ...
+json_meta() {
   local file="$1"; shift
   python3 - "$file" "$@" <<'PY'
 import json, os, sys
 path, rest = sys.argv[1], sys.argv[2:]
 data = {}
 if os.path.exists(path):
-    with open(path) as fh:
-        data = json.load(fh)
+    try:
+        data = json.load(open(path))
+    except ValueError:
+        data = {}
 data.update(dict(zip(rest[::2], rest[1::2])))
-with open(path, "w") as fh:
-    json.dump(data, fh, indent=2)
+json.dump(data, open(path, "w"), indent=2)
+PY
+}
+json_get() { python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],""))' "$1" "$2" 2>/dev/null || true; }
+
+# ------------------------------------------------------------------ quota ---
+# An agent that ran out of quota is not broken — it is off shift. We record when
+# it comes back so nobody keeps sending work into a wall.
+quota_left() { # seconds remaining, 0 when free
+  [ -s "$QUOTA_FILE" ] || { echo 0; return; }
+  python3 - "$QUOTA_FILE" "$1" <<'PY'
+import json, sys, time
+try:
+    data = json.load(open(sys.argv[1]))
+except ValueError:
+    print(0); raise SystemExit
+left = int(data.get(sys.argv[2], {}).get("until", 0) - time.time())
+print(max(0, left))
+PY
+}
+quota_mark() { # quota_mark <agent> <seconds> <reason>
+  mkdir -p "$STATE_DIR"
+  python3 - "$QUOTA_FILE" "$1" "$2" "$3" <<'PY'
+import json, os, sys, time
+path, agent, secs, reason = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+data = {}
+if os.path.exists(path):
+    try:
+        data = json.load(open(path))
+    except ValueError:
+        pass
+data[agent] = {"until": int(time.time()) + secs, "reason": reason[:200],
+               "since": int(time.time())}
+json.dump(data, open(path, "w"), indent=2)
+PY
+}
+quota_clear() {
+  [ -s "$QUOTA_FILE" ] || return 0
+  python3 - "$QUOTA_FILE" "$1" <<'PY'
+import json, sys
+path, agent = sys.argv[1], sys.argv[2]
+try:
+    data = json.load(open(path))
+except ValueError:
+    data = {}
+data.pop(agent, None)
+json.dump(data, open(path, "w"), indent=2)
 PY
 }
 
-json_get() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2],""))' "$1" "$2" 2>/dev/null || true; }
+# Reads a finished run and decides whether the agent hit a wall.
+detect_quota() { # detect_quota <agent> <logfile> <exitcode>
+  local agent="$1" log="$2" rc="$3" tail_text secs=3600 reason=""
+  [ -f "$log" ] || return 1
+  [ "$rc" -eq 0 ] && ! grep -q '\[QUOTA\]' "$log" && return 1
+  tail_text="$(tail -40 "$log" 2>/dev/null | tr 'A-Z' 'a-z')"
+  # Providers bolt "upgrade your plan" onto every 429, including the harmless
+  # per-minute ones. So look for the throttle first: if they told us when to
+  # come back, or called it a rate limit, it is a short bench — not a ban.
+  case "$tail_text" in
+    *"rate_limit_exceeded"*|*"try again in"*|*"rate limit"*|*"too many requests"*|*"retry-after"*)
+      reason="rate limited"; secs=300 ;;
+    *"insufficient_quota"*|*"insufficient quota"*|*"out of credit"*|*"credit balance"*|\
+    *"quota exceeded"*|*"usage limit"*|*"limit reached"*|*"weekly limit"*)
+      reason="out of quota"; secs=21600 ;;
+    *"[quota]"*|*"429"*)
+      reason="rate limited"; secs=300 ;;
+    *) return 1 ;;
+  esac
+  quota_mark "$agent" "$secs" "$reason"
+  warn "$agent is out for now ($reason) — back in $(human_time "$secs"). Work goes to someone else."
+  return 0
+}
+
+# ------------------------------------------------------------------ board ---
+# The team's shared wall. Every brief carries the recent notes, so the next
+# agent starts where the last one stopped.
+board_file() {
+  local dir="${1:-$PWD}" root name
+  root="$(git_root "$dir" || true)"; [ -n "$root" ] || root="$dir"
+  name="$(slugify "$(basename "$root")")-$(printf '%s' "$root" | cksum | cut -d' ' -f1)"
+  mkdir -p "$BOARD_DIR"
+  printf '%s/%s.md\n' "$BOARD_DIR" "$name"
+}
+board_add() { # board_add <dir> <author> <text> [to]
+  local f line; f="$(board_file "$1")"
+  line="$(printf '%s' "$3" | tr '\n' ' ' | cut -c1-600)"
+  [ -n "$line" ] || return 0
+  # The same note twice in a row is noise, not news.
+  if [ -s "$f" ] && grep -qF -- "$line" <(tail -6 "$f"); then return 0; fi
+  { printf -- '- [%s] **%s**' "$(date '+%d/%m %H:%M')" "$2"
+    [ -n "${4:-}" ] && printf ' → **%s**' "$4"
+    printf ': %s\n' "$line"
+  } >>"$f"
+}
+board_recent() { # board_recent <dir> [n]
+  local f; f="$(board_file "$1")"
+  [ -s "$f" ] || return 0
+  tail -"${2:-14}" "$f"
+}
+board_for() { # notes addressed to one agent
+  local f; f="$(board_file "$1")"
+  [ -s "$f" ] || return 0
+  grep -- "→ \*\*$2\*\*" "$f" | tail -6 || true
+}
 
 # ----------------------------------------------------------------- briefs ---
-write_brief() { # write_brief <outfile> <mode> <dir> <prompt> [attachments...]
-  local out="$1" mode="$2" dir="$3" prompt="$4"; shift 4
+# The board belongs to the project, not to the throwaway worktree the agent
+# works in — they are different git roots, and looking the board up from the
+# worktree would hand every agent an empty wall.
+write_brief() { # write_brief <out> <mode> <workdir> <boarddir> <agent> <prompt> [attachments...]
+  local out="$1" mode="$2" dir="$3" board_dir="$4" agent="$5" prompt="$6"; shift 6
   {
     printf '# Task\n\n%s\n\n' "$prompt"
     printf '# Working agreement\n\n'
@@ -118,13 +253,25 @@ write_brief() { # write_brief <outfile> <mode> <dir> <prompt> [attachments...]
     if [ "$mode" = "ask" ]; then
       printf -- '- READ ONLY. Do not create, edit or delete any file. Answer in text.\n'
     else
-      printf -- '- You are on a throwaway git branch. Edit files freely, but do NOT commit, push, or run git checkout/reset.\n'
-      printf -- '- Do not touch files unrelated to the task.\n'
+      printf -- '- You are on a throwaway git branch. Edit files freely, but do NOT run any git command at all — no commit, no push, no checkout, no reset. Leave the changes in the working tree; the lead collects them.\n'
+      printf -- '- Do not touch files unrelated to the task — a teammate may be working on them right now.\n'
       printf -- '- Do not add dependencies unless the task says so.\n'
     fi
     printf -- '- Match the style, language and conventions already in the code.\n'
     printf -- '- If the task is ambiguous, pick the most conventional reading, do it, and say what you assumed.\n'
     printf -- '- Finish with a short report: what you changed, which files, what you did not do.\n'
+    printf -- '- If you notice something outside your task that the team should know — a bug, a bad name, a risk — say it in one line starting with `TIP:`. It reaches the others.\n'
+
+    local mine notes
+    mine="$(board_for "$board_dir" "$agent" || true)"
+    if [ -n "$mine" ]; then
+      printf '\n# Messages for you\n\n%s\n' "$mine"
+    fi
+    notes="$(board_recent "$board_dir" 12 || true)"
+    if [ -n "$notes" ]; then
+      printf '\n# What the rest of the team has been doing\n\n%s\n' "$notes"
+    fi
+
     local f
     for f in "$@"; do
       [ -f "$f" ] || continue
@@ -135,49 +282,127 @@ write_brief() { # write_brief <outfile> <mode> <dir> <prompt> [attachments...]
   } >"$out"
 }
 
+# Pulls the TIP: lines out of a report and puts them on the wall.
+harvest_tips() { # harvest_tips <dir> <agent> <file>
+  [ -f "$3" ] || return 0
+  grep -h '^[[:space:]]*[-*]\?[[:space:]]*TIP:' "$3" 2>/dev/null | head -5 | while IFS= read -r line; do
+    board_add "$1" "$2" "${line#*TIP:}"
+  done || true
+}
+
+# --------------------------------------------------------------- routing ----
+# Who should get this task? Tags first, then whoever is free.
+pick_agent() { # pick_agent <task-text> [exclude...]
+  local task; task="$(printf '%s' "$1" | tr 'A-Z' 'a-z')"; shift
+  local excluded=" $* " best="" best_score=-1 a score tags
+  for a in $(ready_agents); do
+    case "$excluded" in *" $a "*) continue ;; esac
+    tags="$(meta "$a" ADAPTER_TAGS | tr 'A-Z' 'a-z')"
+    score=0
+    local w
+    for w in $(printf '%s' "$tags" | tr -cs 'a-z0-9' ' '); do
+      [ ${#w} -lt 4 ] && continue
+      case "$task" in *"$w"*) score=$((score + 3)) ;; esac
+    done
+    case "$task" in
+      *design*|*ui*|*css*|*layout*|*visual*|*tela*|*landing*|*front*)
+        case "$a" in antigravity|cursor) score=$((score + 6)) ;; esac ;;
+      *test*|*teste*|*lint*|*boilerplate*|*docs*|*documenta*)
+        case "$a" in groq|cerebras|together|claude) score=$((score + 5)) ;; esac ;;
+      *api*|*backend*|*server*|*banco*|*database*|*refactor*)
+        case "$a" in codex|nvidia|deepseek) score=$((score + 5)) ;; esac ;;
+    esac
+    if [ "$score" -gt "$best_score" ]; then best="$a"; best_score="$score"; fi
+  done
+  if [ -n "$best" ]; then printf '%s\n' "$best"; fi
+  return 0
+}
+
 # -------------------------------------------------------------- commands ----
 cmd_agents() {
-  local id label tags st state detail
-  printf '%s\n' "${B}roster${RST}"
+  local id label tags st state detail kind
+  printf '%s\n' "${B}the team${RST}"
   for id in $(adapter_ids); do
-    label="$(meta "$id" ADAPTER_LABEL)"
-    tags="$(meta "$id" ADAPTER_TAGS)"
+    label="$(meta "$id" ADAPTER_LABEL)"; tags="$(meta "$id" ADAPTER_TAGS)"
+    kind="$(meta "$id" ADAPTER_KIND)"; [ -n "$kind" ] || kind="cli"
     st="$(probe "$id")"; state="${st%%|*}"; detail="${st#*|}"
     case "$state" in
-      ok)      printf '  %s%-12s%s %s\n' "$GRN" "$id" "$RST" "$label" ;;
-      noauth)  printf '  %s%-12s%s %s %s(%s)%s\n' "$YEL" "$id" "$RST" "$label" "$DIM" "$detail" "$RST" ;;
-      *)       printf '  %s%-12s%s %s %s(%s)%s\n' "$DIM" "$id" "$RST" "$label" "$DIM" "$detail" "$RST" ;;
+      ok)       printf '  %s%-12s%s %s\n' "$GRN" "$id" "$RST" "$label" ;;
+      cooldown) printf '  %s%-12s%s %s %s(%s)%s\n' "$CYN" "$id" "$RST" "$label" "$DIM" "$detail" "$RST" ;;
+      noauth)   printf '  %s%-12s%s %s %s(%s)%s\n' "$YEL" "$id" "$RST" "$label" "$DIM" "$detail" "$RST" ;;
+      *)        printf '  %s%-12s%s %s %s(%s)%s\n' "$DIM" "$id" "$RST" "$label" "$DIM" "$detail" "$RST" ;;
     esac
-    [ -n "$tags" ] && printf '               %sgood at: %s%s\n' "$DIM" "$tags" "$RST"
+    [ -n "$tags" ] && printf '               %s%s%s\n' "$DIM" "$tags" "$RST"
   done
 }
 
 cmd_doctor() {
-  local id st state detail bin ok=0
+  local id st state detail ok=0 total=0
   printf '%s\n' "${B}team doctor${RST} (v$VERSION)"
   printf '  home: %s\n\n' "$TEAM_HOME"
   for id in $(adapter_ids); do
+    total=$((total+1))
     st="$(probe "$id")"; state="${st%%|*}"; detail="${st#*|}"
-    bin="$(meta "$id" ADAPTER_BIN)"
     case "$state" in
-      ok)     printf '  %s✓%s %-12s %s\n' "$GRN" "$RST" "$id" "$detail"; ok=$((ok+1)) ;;
-      noauth) printf '  %s!%s %-12s %s\n' "$YEL" "$RST" "$id" "$detail" ;;
-      *)      printf '  %s·%s %-12s %s\n' "$DIM" "$RST" "$id" "$detail"
-              printf '      %sinstall: %s%s\n' "$DIM" "$(meta "$id" ADAPTER_INSTALL)" "$RST" ;;
+      ok)       printf '  %s✓%s %-12s %s\n' "$GRN" "$RST" "$id" "$detail"; ok=$((ok+1)) ;;
+      cooldown) printf '  %s◔%s %-12s %s\n' "$CYN" "$RST" "$id" "$detail" ;;
+      noauth)   printf '  %s!%s %-12s %s\n' "$YEL" "$RST" "$id" "$detail" ;;
+      *)        printf '  %s·%s %-12s %s\n' "$DIM" "$RST" "$id" "$detail"
+                printf '      %sto hire: team hire %s%s\n' "$DIM" "$id" "$RST" ;;
     esac
   done
-  printf '\n  %s ready, %s adapters total\n' "$ok" "$(adapter_ids | wc -l | tr -d ' ')"
+  printf '\n  %s of %s ready to work\n' "$ok" "$total"
   [ "$ok" -eq 0 ] && return 1 || return 0
 }
 
-parse_common() { # sets DIR MODEL TIMEOUT ATTACH[] BG PLACE, leaves REST[]
-  DIR="$PWD"; MODEL=""; TIMEOUT=900; BG=0; PLACE="worktree"; ATTACH=(); REST=()
+cmd_hire() {
+  local id="${1:-}"
+  if [ -z "$id" ]; then
+    printf '%s\n' "${B}who you could add${RST}"
+    local a st
+    for a in $(adapter_ids); do
+      st="$(probe "$a")"; case "${st%%|*}" in ok|cooldown) continue ;; esac
+      printf '  %s%-12s%s %s\n' "$B" "$a" "$RST" "$(meta "$a" ADAPTER_LABEL)"
+      printf '               %s%s%s\n' "$DIM" "$(meta "$a" ADAPTER_INSTALL)" "$RST"
+    done
+    return 0
+  fi
+  adapter_file "$id" >/dev/null || die "no adapter named $id"
+  printf '\n%s%s%s — %s\n\n' "$B" "$id" "$RST" "$(meta "$id" ADAPTER_LABEL)"
+  printf '  good at: %s\n\n' "$(meta "$id" ADAPTER_TAGS)"
+  printf '  %s\n\n' "$(meta "$id" ADAPTER_INSTALL)"
+  printf '  then check it with: team doctor\n'
+}
+
+cmd_quota() {
+  if [ "${1:-}" = "--clear" ]; then
+    if [ -n "${2:-}" ]; then quota_clear "$2"; say "$2 is back on duty"
+    else rm -f "$QUOTA_FILE"; say "everyone is back on duty"; fi
+    return 0
+  fi
+  local any=0 a left
+  printf '%s\n' "${B}quota${RST}"
+  for a in $(adapter_ids); do
+    left="$(quota_left "$a")"
+    if [ "$left" -gt 0 ] 2>/dev/null; then
+      any=1
+      printf '  %s◔%s %-12s back in %s %s(%s)%s\n' "$CYN" "$RST" "$a" "$(human_time "$left")" \
+        "$DIM" "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],{}).get("reason",""))' "$QUOTA_FILE" "$a" 2>/dev/null)" "$RST"
+    fi
+  done
+  [ "$any" -eq 0 ] && printf '  everybody has quota left\n'
+  return 0
+}
+
+parse_common() {
+  DIR="$PWD"; MODEL=""; TIMEOUT=900; BG=0; PLACE="worktree"; BY=""; ATTACH=(); REST=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --dir)      DIR="$2"; shift 2 ;;
       --model|-m) MODEL="$2"; shift 2 ;;
       --timeout)  TIMEOUT="$2"; shift 2 ;;
       --file|-f)  ATTACH+=("$2"); shift 2 ;;
+      --by)       BY="$2"; shift 2 ;;
       --here)     PLACE="here"; shift ;;
       --worktree) PLACE="worktree"; shift ;;
       --bg)       BG=1; shift ;;
@@ -187,6 +412,7 @@ parse_common() { # sets DIR MODEL TIMEOUT ATTACH[] BG PLACE, leaves REST[]
     esac
   done
   DIR="$(cd "$DIR" && pwd)"
+  export TEAM_AGENT_TIMEOUT="$TIMEOUT"
 }
 
 cmd_ask() {
@@ -195,22 +421,22 @@ cmd_ask() {
   local prompt="${REST[*]:-}"
   [ -n "$prompt" ] || die "nothing to ask. usage: team ask <agent> \"question\""
   local st; st="$(probe "$agent")"
-  [ "${st%%|*}" = "ok" ] || die "$agent is not ready: ${st#*|}"
+  [ "${st%%|*}" = "ok" ] || die "$agent is not available: ${st#*|}"
 
-  local id dir_run; id="$(now_id "$agent")"; dir_run="$RUNS_DIR/$id"
-  mkdir -p "$dir_run"
-  write_brief "$dir_run/brief.md" ask "$DIR" "$prompt" "${ATTACH[@]:-}"
-  json_meta "$dir_run/meta.json" id "$id" agent "$agent" mode ask dir "$DIR" \
-            model "$MODEL" status running prompt "$prompt"
+  local id d; id="$(now_id "$agent")"; d="$RUNS_DIR/$id"; mkdir -p "$d"
+  write_brief "$d/brief.md" ask "$DIR" "$DIR" "$agent" "$prompt" "${ATTACH[@]:-}"
+  json_meta "$d/meta.json" id "$id" agent "$agent" mode ask dir "$DIR" status running prompt "$prompt"
 
-  local file; file="$(adapter_file "$agent")"
+  local file; file="$(adapter_file "$agent")" rc=0
   set +e
-  run_limited "$TIMEOUT" "$dir_run/answer.md" \
-    bash -c 'set +u; . "$1"; adapter_ask "$2" "$3" "$4"' _ "$file" "$DIR" "$dir_run/brief.md" "$MODEL"
-  local rc=$?
+  run_limited "$TIMEOUT" "$d/answer.md" \
+    bash -c 'set +u; . "$1" >/dev/null 2>&1; adapter_ask "$2" "$3" "$4"' _ "$file" "$DIR" "$d/brief.md" "$MODEL"
+  rc=$?
   set -e
-  json_meta "$dir_run/meta.json" status "$([ $rc -eq 0 ] && echo done || echo failed)" exit "$rc"
-  cat "$dir_run/answer.md"
+  detect_quota "$agent" "$d/answer.md" "$rc" || true
+  json_meta "$d/meta.json" status "$([ $rc -eq 0 ] && echo done || echo failed)" exit "$rc"
+  cat "$d/answer.md"
+  harvest_tips "$DIR" "$agent" "$d/answer.md"
   [ $rc -ne 0 ] && warn "$agent exited with $rc (run $id)"
   printf '\n%srun %s%s\n' "$DIM" "$id" "$RST"
   return 0
@@ -220,35 +446,95 @@ cmd_panel() {
   parse_common "$@"
   local prompt="${REST[*]:-}"
   [ -n "$prompt" ] || die "nothing to ask. usage: team panel \"question\""
-  local id base; id="$(now_id panel)"; base="$RUNS_DIR/$id"
-  mkdir -p "$base"
-  write_brief "$base/brief.md" ask "$DIR" "$prompt" "${ATTACH[@]:-}"
+  local id base; id="$(now_id panel)"; base="$RUNS_DIR/$id"; mkdir -p "$base"
 
-  local agents=() a st
-  for a in $(adapter_ids); do
-    st="$(probe "$a")"; [ "${st%%|*}" = "ok" ] && agents+=("$a")
-  done
+  local agents=() a
+  for a in $(ready_agents); do agents+=("$a"); done
   [ ${#agents[@]} -gt 0 ] || die "nobody available. run: team doctor"
 
-  say "${B}panel${RST}: asking ${agents[*]} in parallel"
+  say "${B}panel${RST}: ${agents[*]}"
   local pids=()
   for a in "${agents[@]}"; do
+    write_brief "$base/$a-brief.md" ask "$DIR" "$DIR" "$a" "$prompt" "${ATTACH[@]:-}"
     local f; f="$(adapter_file "$a")"
     ( run_limited "$TIMEOUT" "$base/$a.md" \
-        bash -c 'set +u; . "$1"; adapter_ask "$2" "$3" "$4"' _ "$f" "$DIR" "$base/brief.md" "$MODEL" ) &
+        bash -c 'set +u; . "$1" >/dev/null 2>&1; adapter_ask "$2" "$3" "$4"' _ "$f" "$DIR" "$base/$a-brief.md" "$MODEL"
+      detect_quota "$a" "$base/$a.md" $? >/dev/null 2>&1 || true ) &
     pids+=($!)
   done
   local p; for p in "${pids[@]}"; do wait "$p" || true; done
 
   for a in "${agents[@]}"; do
     printf '\n%s──── %s ────%s\n' "$B" "$a" "$RST"
-    if [ -s "$base/$a.md" ]; then
-      cat "$base/$a.md"
-    else
-      printf '%s(no answer — timed out or errored)%s\n' "$DIM" "$RST"
-    fi
+    if [ -s "$base/$a.md" ]; then cat "$base/$a.md"; harvest_tips "$DIR" "$a" "$base/$a.md"
+    else printf '%s(no answer — timed out or errored)%s\n' "$DIM" "$RST"; fi
   done
   printf '\n%spanel %s%s\n' "$DIM" "$id" "$RST"
+}
+
+# start_run <agent> <dir> <prompt> <timeout> <place> <model> <brief-extra-file>
+# Prints the run id. Runs in the background; use finish_run/wait to collect.
+start_run() {
+  local agent="$1" dir="$2" prompt="$3" timeout="$4" place="$5" model="$6"; shift 6
+  local id d root work branch="" base=""
+  id="$(now_id "$agent")"; d="$RUNS_DIR/$id"; mkdir -p "$d"
+  root="$(git_root "$dir" || true)"
+  [ -n "$root" ] && base="$(git -C "$root" rev-parse HEAD 2>/dev/null || true)"
+  if [ -n "$root" ] && [ "$place" = "worktree" ]; then
+    branch="team/$agent/${id##*-}"
+    work="$WT_DIR/$id"; mkdir -p "$WT_DIR"
+    git -C "$root" worktree add -q -b "$branch" "$work" HEAD || die "could not create a worktree for $agent"
+    if ! git -C "$root" diff --quiet HEAD 2>/dev/null; then
+      git -C "$root" diff HEAD | git -C "$work" apply --allow-empty - 2>/dev/null || true
+    fi
+    # Freeze that starting point as a commit of its own. Everything the agent
+    # does is then the diff against it — the uncommitted work we carried over
+    # does not come back as if the agent had written it.
+    git -C "$work" add -A >/dev/null 2>&1 || true
+    git -C "$work" -c user.email=team@local -c user.name=team \
+        commit -q --allow-empty -m "team: starting point" >/dev/null 2>&1 || true
+    base="$(git -C "$work" rev-parse HEAD 2>/dev/null || printf '%s' "$base")"
+  else
+    work="$dir"
+  fi
+  write_brief "$d/brief.md" run "$work" "$dir" "$agent" "$prompt" "$@"
+  json_meta "$d/meta.json" id "$id" agent "$agent" mode run dir "$dir" work "$work" \
+            root "${root:-}" branch "$branch" base "${base:-}" model "$model" \
+            status running prompt "$prompt"
+  local file; file="$(adapter_file "$agent")"
+  (
+    set +e
+    TEAM_AGENT_TIMEOUT="$timeout" run_limited_split "$timeout" "$d/report.md" "$d/log.txt" \
+      bash -c 'set +u; . "$1" >/dev/null 2>&1; adapter_run "$2" "$3" "$4"' _ "$file" "$work" "$d/brief.md" "$model"
+    rc=$?
+    if [ -n "$root" ]; then
+      # Diff against the commit the worktree started from, not against HEAD:
+      # an agent that commits on its own would otherwise hand back an empty
+      # patch, and the work would look like it never happened.
+      git -C "$work" add -A >/dev/null 2>&1 || true
+      git -C "$work" diff --cached --binary "${base:-HEAD}" >"$d/patch.diff" 2>/dev/null || true
+      json_meta "$d/meta.json" files "$(git -C "$work" diff --cached --name-only "${base:-HEAD}" 2>/dev/null | wc -l | tr -d ' ')"
+      git -C "$work" reset -q "${base:-HEAD}" >/dev/null 2>&1 || true
+    fi
+    cat "$d/report.md" >>"$d/log.txt" 2>/dev/null || true
+    detect_quota "$agent" "$d/log.txt" "$rc" >/dev/null 2>&1 || true
+    json_meta "$d/meta.json" status "$([ "$rc" -eq 0 ] && echo done || echo failed)" exit "$rc"
+    board_add "$dir" "$agent" "$(tail -8 "$d/report.md" 2>/dev/null | tr '\n' ' ' | cut -c1-400)"
+    harvest_tips "$dir" "$agent" "$d/report.md"
+  ) >/dev/null 2>&1 &
+  json_meta "$d/meta.json" pid "$!"
+  printf '%s\n' "$id"
+}
+
+wait_run() { # wait_run <id> [quiet]
+  local d="$RUNS_DIR/$1" status
+  [ -d "$d" ] || die "unknown run: $1"
+  while :; do
+    refresh_status "$1"
+    status="$(json_get "$d/meta.json" status)"
+    [ "$status" != "running" ] && break
+    sleep 3
+  done
 }
 
 cmd_run() {
@@ -257,95 +543,173 @@ cmd_run() {
   local prompt="${REST[*]:-}"
   [ -n "$prompt" ] || die "no task given. usage: team run <agent> \"task\""
   local st; st="$(probe "$agent")"
-  [ "${st%%|*}" = "ok" ] || die "$agent is not ready: ${st#*|}"
-
-  local id dir_run; id="$(now_id "$agent")"; dir_run="$RUNS_DIR/$id"
-  mkdir -p "$dir_run"
-
-  local root work branch=""
-  root="$(git_root "$DIR" || true)"
-  if [ -n "$root" ] && [ "$PLACE" = "worktree" ]; then
-    branch="team/$agent/${id##*-}"
-    work="$WT_DIR/$id"
-    mkdir -p "$WT_DIR"
-    git -C "$root" worktree add -q -b "$branch" "$work" HEAD \
-      || die "could not create the worktree (uncommitted rebase? branch in use?)"
-    # carry uncommitted work over so the agent sees the same tree you see
-    if ! git -C "$root" diff --quiet HEAD 2>/dev/null; then
-      git -C "$root" diff HEAD | git -C "$work" apply --allow-empty - || warn "could not carry local changes into the worktree"
+  if [ "${st%%|*}" != "ok" ]; then
+    local alt; alt="$(pick_agent "$prompt" "$agent")"
+    if [ -n "$alt" ]; then
+      warn "$agent is not available (${st#*|}) — handing this to $alt instead"
+      agent="$alt"
+    else
+      die "$agent is not available: ${st#*|} (and nobody else is free)"
     fi
-    say "${DIM}worktree $work (branch $branch)${RST}"
-  else
-    work="$DIR"
-    [ -n "$root" ] || warn "$DIR is not a git repo — no patch will be produced"
   fi
-
-  write_brief "$dir_run/brief.md" run "$work" "$prompt" "${ATTACH[@]:-}"
-  json_meta "$dir_run/meta.json" id "$id" agent "$agent" mode run dir "$DIR" \
-            work "$work" root "${root:-}" branch "$branch" model "$MODEL" \
-            place "$PLACE" status running prompt "$prompt"
-
-  local file; file="$(adapter_file "$agent")"
-  _finish_run() {
-    local rc="$1"
-    if [ -n "$root" ]; then
-      git -C "$work" add -A >/dev/null 2>&1 || true
-      git -C "$work" diff --cached --binary >"$dir_run/patch.diff" 2>/dev/null || true
-      git -C "$work" reset -q >/dev/null 2>&1 || true
-      json_meta "$dir_run/meta.json" \
-        files "$(git -C "$work" diff --name-only HEAD 2>/dev/null | wc -l | tr -d ' ')"
-    fi
-    json_meta "$dir_run/meta.json" status "$([ "$rc" -eq 0 ] && echo done || echo failed)" exit "$rc"
-  }
-
+  local id; id="$(start_run "$agent" "$DIR" "$prompt" "$TIMEOUT" "$PLACE" "$MODEL" "${ATTACH[@]:-}")"
   if [ "$BG" -eq 1 ]; then
-    (
-      set +e
-      run_limited "$TIMEOUT" "$dir_run/log.txt" \
-        bash -c 'set +u; . "$1"; adapter_run "$2" "$3" "$4"' _ "$file" "$work" "$dir_run/brief.md" "$MODEL"
-      _finish_run $?
-    ) >/dev/null 2>&1 &
-    say "${B}$agent${RST} started in the background — run ${B}team wait $id${RST}"
-    printf '%s\n' "$id"
-    return 0
+    say "${B}$agent${RST} started — collect it with: ${B}team wait $id${RST}"
+    printf '%s\n' "$id"; return 0
   fi
-
   say "${B}$agent${RST} is working… (timeout ${TIMEOUT}s)"
-  set +e
-  run_limited "$TIMEOUT" "$dir_run/log.txt" \
-    bash -c 'set +u; . "$1"; adapter_run "$2" "$3" "$4"' _ "$file" "$work" "$dir_run/brief.md" "$MODEL"
-  local rc=$?
-  set -e
-  _finish_run "$rc"
+  wait_run "$id"
   cmd_show "$id"
-  [ "$rc" -ne 0 ] && warn "$agent exited with $rc — see $dir_run/log.txt"
+}
+
+# team sprint "task one" "codex: task two" ...   — everyone at once
+cmd_sprint() {
+  parse_common "$@"
+  [ ${#REST[@]} -gt 0 ] || die "usage: team sprint \"task one\" \"agent: task two\" ..."
+  local free; free="$(ready_agents | tr '\n' ' ')"
+  [ -n "$free" ] || die "nobody available. run: team doctor"
+
+  local ids=() names=() used="" task agent id
+  for task in "${REST[@]}"; do
+    agent=""
+    case "$task" in
+      *:*)
+        local head="${task%%:*}"
+        if adapter_file "$(printf '%s' "$head" | tr -d ' ')" >/dev/null 2>&1; then
+          agent="$(printf '%s' "$head" | tr -d ' ')"; task="${task#*:}"
+        fi ;;
+    esac
+    [ -n "$agent" ] || agent="$(pick_agent "$task" $used)"
+    [ -n "$agent" ] || agent="$(pick_agent "$task")"   # everyone busy: double up
+    [ -n "$agent" ] || die "no agent could take: $task"
+    used="$used $agent"
+    id="$(start_run "$agent" "$DIR" "$task" "$TIMEOUT" "$PLACE" "$MODEL")"
+    ids+=("$id"); names+=("$agent")
+    say "  ${GRN}→${RST} ${B}$agent${RST}: $(printf '%s' "$task" | cut -c1-70)"
+  done
+  say ""
+  say "${B}sprint started${RST} — ${#ids[@]} tasks in parallel"
+  [ "$BG" -eq 1 ] && { printf '%s\n' "${ids[@]}"; return 0; }
+
+  local i=0
+  for id in "${ids[@]}"; do wait_run "$id"; i=$((i+1)); done
+  say ""
+  say "${B}sprint done${RST}"
+  local all_files=""
+  for id in "${ids[@]}"; do
+    local d="$RUNS_DIR/$id" status agent2 files
+    status="$(json_get "$d/meta.json" status)"; agent2="$(json_get "$d/meta.json" agent)"
+    files="$(git apply --numstat "$d/patch.diff" 2>/dev/null | awk '{print $3}' || true)"
+    all_files="$all_files$files
+"
+    case "$status" in
+      done) printf '  %s✓%s %-12s %s   %steam show %s%s\n' "$GRN" "$RST" "$agent2" \
+              "$(printf '%s' "$files" | tr '\n' ' ' | cut -c1-46)" "$DIM" "$id" "$RST" ;;
+      *)    printf '  %s✗%s %-12s %s   %steam show %s%s\n' "$RED" "$RST" "$agent2" "$status" "$DIM" "$id" "$RST" ;;
+    esac
+  done
+  local clashes; clashes="$(printf '%s' "$all_files" | grep -v '^$' | sort | uniq -d || true)"
+  if [ -n "$clashes" ]; then
+    say ""
+    warn "two agents touched the same files — apply one, then rebase the other:"
+    printf '%s\n' "$clashes" | sed 's/^/    /'
+  fi
+}
+
+cmd_standup() {
+  local d id status agent prompt started any=0
+  printf '%s\n' "${B}standup${RST}"
+  for d in $(ls -1t "$RUNS_DIR" 2>/dev/null | head -30); do
+    refresh_status "$d"
+    status="$(json_get "$RUNS_DIR/$d/meta.json" status)"
+    [ "$status" = "running" ] || continue
+    any=1
+    agent="$(json_get "$RUNS_DIR/$d/meta.json" agent)"
+    prompt="$(json_get "$RUNS_DIR/$d/meta.json" prompt)"
+    started="$(basename "$(json_get "$RUNS_DIR/$d/meta.json" dir)")"
+    printf '  %s…%s %-12s %s%-16s%s %s\n' "$YEL" "$RST" "$agent" "$DIM" "$started" "$RST" \
+      "$(printf '%s' "$prompt" | tr -s ' ' | cut -c1-52)"
+  done
+  [ "$any" -eq 0 ] && printf '  nobody is working right now\n'
   return 0
 }
 
-cmd_wait() {
-  local id="$1" dir_run="$RUNS_DIR/$1"
-  [ -d "$dir_run" ] || die "unknown run: $id"
-  local status
-  while :; do
-    status="$(json_get "$dir_run/meta.json" status)"
-    [ "$status" != "running" ] && break
-    sleep 3
-  done
-  cmd_show "$id"
+cmd_board() {
+  parse_common "$@"
+  local f; f="$(board_file "$DIR")"
+  [ -s "$f" ] || { say "the board is empty"; return 0; }
+  printf '%s\n' "${B}team board${RST} ${DIM}($f)${RST}"
+  tail -"${REST[0]:-25}" "$f"
+}
+
+cmd_note() { # team note <author> "text"
+  local author="$1"; shift
+  parse_common "$@"
+  board_add "$DIR" "$author" "${REST[*]}"
+  say "noted on the board"
+}
+
+cmd_relay() { # team relay <from> <to> "text"
+  local from="$1" to="$2"; shift 2
+  parse_common "$@"
+  adapter_file "$to" >/dev/null || die "no agent named $to"
+  board_add "$DIR" "$from" "${REST[*]}" "$to"
+  say "message left for $to — it goes into their next brief"
+}
+
+cmd_crosscheck() { # team crosscheck <id> [--by agent]
+  local id="$1"; shift
+  parse_common "$@"
+  local d="$RUNS_DIR/$id"
+  [ -s "$d/patch.diff" ] || die "run $id produced no patch to review"
+  local author; author="$(json_get "$d/meta.json" agent)"
+  local dir; dir="$(json_get "$d/meta.json" dir)"; [ -n "$dir" ] && DIR="$dir"
+  local reviewer="$BY"
+  [ -n "$reviewer" ] || reviewer="$(pick_agent "review code diff correctness" "$author")"
+  [ -n "$reviewer" ] || die "nobody free to review"
+  say "${B}$reviewer${RST} is reviewing ${B}$author${RST}'s patch…"
+  local out; out="$RUNS_DIR/$(now_id "review-$reviewer")"; mkdir -p "$out"
+  write_brief "$out/brief.md" ask "$DIR" "$DIR" "$reviewer" \
+    "A teammate ($author) produced the patch attached below. Review it: does it do what it claims, does it break anything, is anything missing? Be specific and short — bullet points, worst first. If it is fine, say so plainly." \
+    "$d/patch.diff"
+  local f; f="$(adapter_file "$reviewer")" rc=0
+  set +e
+  run_limited "$TIMEOUT" "$out/answer.md" \
+    bash -c 'set +u; . "$1" >/dev/null 2>&1; adapter_ask "$2" "$3" "$4"' _ "$f" "$DIR" "$out/brief.md" "$MODEL"
+  rc=$?
+  set -e
+  detect_quota "$reviewer" "$out/answer.md" "$rc" || true
+  cat "$out/answer.md"
+  board_add "$DIR" "$reviewer" "reviewed $author's patch: $(head -c 300 "$out/answer.md" | tr '\n' ' ')" "$author"
+}
+
+
+# A run is only running while its worker process is. A killed terminal used to
+# leave runs marked "running" for ever, and then standup lied.
+refresh_status() { # refresh_status <run-id>
+  local d="$RUNS_DIR/$1" status pid
+  [ -f "$d/meta.json" ] || return 0
+  status="$(json_get "$d/meta.json" status)"
+  [ "$status" = "running" ] || return 0
+  pid="$(json_get "$d/meta.json" pid)"
+  [ -n "$pid" ] || return 0
+  if ! kill -0 "$pid" 2>/dev/null; then
+    json_meta "$d/meta.json" status interrupted
+  fi
 }
 
 cmd_runs() {
   [ -d "$RUNS_DIR" ] || { say "no runs yet"; return 0; }
-  local d id status agent files
+  local d status agent files
   for d in $(ls -1t "$RUNS_DIR" 2>/dev/null | head -"${1:-20}"); do
-    id="$d"
+    refresh_status "$d"
     status="$(json_get "$RUNS_DIR/$d/meta.json" status)"
     agent="$(json_get "$RUNS_DIR/$d/meta.json" agent)"
     files="$(json_get "$RUNS_DIR/$d/meta.json" files)"
     case "$status" in
-      done)    printf '  %s✓%s %-30s %-10s %s files\n' "$GRN" "$RST" "$id" "$agent" "${files:-0}" ;;
-      running) printf '  %s…%s %-30s %-10s\n' "$YEL" "$RST" "$id" "$agent" ;;
-      *)       printf '  %s✗%s %-30s %-10s %s\n' "$RED" "$RST" "$id" "$agent" "$status" ;;
+      done)    printf '  %s✓%s %-34s %-12s %s files\n' "$GRN" "$RST" "$d" "$agent" "${files:-0}" ;;
+      running) printf '  %s…%s %-34s %-12s\n' "$YEL" "$RST" "$d" "$agent" ;;
+      *)       printf '  %s✗%s %-34s %-12s %s\n' "$RED" "$RST" "$d" "$agent" "$status" ;;
     esac
   done
 }
@@ -355,26 +719,23 @@ cmd_show() {
   [ -d "$d" ] || die "unknown run: $id"
   local agent status; agent="$(json_get "$d/meta.json" agent)"; status="$(json_get "$d/meta.json" status)"
   printf '\n%s%s%s  %s  %s\n' "$B" "$id" "$RST" "$agent" "$status"
-  if [ -s "$d/answer.md" ]; then cat "$d/answer.md"; fi
-  if [ -s "$d/log.txt" ]; then
-    printf '\n%s─ report ─%s\n' "$DIM" "$RST"
-    tail -30 "$d/log.txt"
+  [ -s "$d/answer.md" ] && cat "$d/answer.md"
+  if [ -s "$d/report.md" ]; then
+    printf '\n%s─ report ─%s\n' "$DIM" "$RST"; tail -25 "$d/report.md"
+  elif [ -s "$d/log.txt" ]; then
+    printf '\n%s─ log ─%s\n' "$DIM" "$RST"; tail -20 "$d/log.txt"
   fi
   if [ -s "$d/patch.diff" ]; then
     printf '\n%s─ patch ─%s\n' "$DIM" "$RST"
     git apply --numstat "$d/patch.diff" 2>/dev/null | awk '{printf "  +%-6s -%-6s %s\n", $1, $2, $3}'
-    printf '\n  %steam diff %s%s   %steam apply %s%s   %steam drop %s%s\n' \
-      "$DIM" "$id" "$RST" "$DIM" "$id" "$RST" "$DIM" "$id" "$RST"
+    printf '\n  %steam diff %s  ·  team crosscheck %s  ·  team apply %s  ·  team drop %s%s\n' \
+      "$DIM" "$id" "$id" "$id" "$id" "$RST"
   else
     printf '\n  %sno file changes%s\n' "$DIM" "$RST"
   fi
 }
 
-cmd_diff() {
-  local d="$RUNS_DIR/$1"
-  [ -s "$d/patch.diff" ] || die "run $1 produced no patch"
-  cat "$d/patch.diff"
-}
+cmd_diff()  { local d="$RUNS_DIR/$1"; [ -s "$d/patch.diff" ] || die "run $1 produced no patch"; cat "$d/patch.diff"; }
 
 cmd_apply() {
   local id="$1" d="$RUNS_DIR/$1"
@@ -399,48 +760,132 @@ cmd_drop() {
   say "dropped $id"
 }
 
+# Should the lead offer to bring more people in? Said once, then never again.
+cmd_suggest() {
+  mkdir -p "$STATE_DIR"
+  local force=0 mode="check"
+  case "${1:-}" in
+    --force) force=1 ;; --mute) mode=mute ;; --status) mode=status ;; --reset) mode=reset ;;
+  esac
+  if [ "$mode" = mute ]; then
+    json_meta "$SUGGEST_FILE" muted 1 mutedAt "$(now)"
+    say "fine — I won't bring up hiring more AIs again unless you ask (team suggest --force)"
+    return 0
+  fi
+  if [ "$mode" = reset ]; then rm -f "$SUGGEST_FILE"; say "suggestion reset"; return 0; fi
+  local muted asked
+  muted="$(json_get "$SUGGEST_FILE" muted)"; asked="$(json_get "$SUGGEST_FILE" asked)"
+  if [ "$mode" = status ]; then
+    printf 'muted=%s asked=%s\n' "${muted:-0}" "${asked:-0}"; return 0
+  fi
+  if [ "$force" -eq 0 ]; then
+    [ "${muted:-0}" = "1" ] && return 1
+    [ "${asked:-0}" = "1" ] && return 1
+  fi
+
+  local ready free_hires=() paid_hires=() a st label
+  ready="$(ready_agents | wc -l | tr -d ' ')"
+  for a in $(adapter_ids); do
+    st="$(probe "$a")"; case "${st%%|*}" in ok|cooldown) continue ;; esac
+    label="$(meta "$a" ADAPTER_LABEL)"
+    case "$label" in *free*|*Free*) free_hires+=("$a — $label") ;; *) paid_hires+=("$a — $label") ;; esac
+  done
+
+  json_meta "$SUGGEST_FILE" asked 1 askedAt "$(now)" readyAt "$ready"
+  printf '\n%sMy team is small for a job this size — %s of us are working right now.%s\n' "$B" "$ready" "$RST"
+  printf 'Want me to bring more AIs in? These are free:\n\n'
+  local h
+  for h in "${free_hires[@]:-}"; do [ -n "$h" ] && printf '  · %s\n' "$h"; done
+  if [ ${#paid_hires[@]} -gt 0 ]; then
+    printf '\nAnd these are paid, if you ever want them:\n\n'
+    for h in "${paid_hires[@]}"; do printf '  · %s\n' "$h"; done
+  fi
+  printf '\n%sSay the word and I set one up (team hire <name>). Ignore this and I never bring it up again.%s\n' "$DIM" "$RST"
+  return 0
+}
+
+
+# team port — give the same instructions to the other agents, so ia-team works
+# from Codex, Gemini CLI, opencode or Cursor and not only from Claude Code.
+cmd_port() {
+  local scope="project"
+  case "${1:-}" in --global) scope=global; shift ;; --project|--here) shift ;; esac
+  parse_common "$@"
+  local src="" c
+  for c in "$TEAM_HOME/port/TEAM.md" "$REPO_ROOT/port/TEAM.md"; do
+    [ -f "$c" ] && { src="$c"; break; }
+  done
+  [ -n "$src" ] || die "port/TEAM.md is missing — reinstall with ./install.sh"
+
+  local targets=()
+  if [ "$scope" = global ]; then
+    mkdir -p "$HOME/.codex" "$HOME/.gemini"
+    targets=("$HOME/.codex/AGENTS.md" "$HOME/.gemini/GEMINI.md")
+  else
+    targets=("$DIR/AGENTS.md" "$DIR/GEMINI.md")
+  fi
+
+  [ -f "$TEAM_PORT_HELPER" ] || die "lib/port_install.py is missing — reinstall with ./install.sh"
+  python3 "$TEAM_PORT_HELPER" "$src" "${targets[@]}"
+  say ""
+  say "Codex and opencode read AGENTS.md; Gemini CLI reads GEMINI.md."
+  say "Antigravity picks up AGENTS.md in the project it opens."
+}
+
 usage() {
   cat <<'USAGE'
-team — put the other agentic CLIs to work and review what they bring back
+team — run the other AIs as a team, in parallel, and review what they bring back
 
-  team doctor                     who is installed and signed in
-  team agents                     the roster and what each one is good at
-  team ask <agent> "question"     read-only question (no file is touched)
-  team panel "question"           the same question to everyone, in parallel
-  team run <agent> "task"         real task in an isolated git worktree
-  team runs [n]                   recent runs
-  team show <id>                  brief, report and patch summary
-  team diff <id>                  the full patch
-  team apply <id>                 apply the patch to your working tree
-  team drop <id>                  throw the run and its worktree away
-  team wait <id>                  block until a --bg run finishes
+  team doctor                      who is available, signed in, and has quota
+  team agents                      the roster and what each one is good at
+  team hire [name]                 how to add someone who is not set up yet
+  team quota [--clear [agent]]     who is out of quota, and until when
 
-Options for ask/panel/run:
-  --dir <path>      where to work (default: current directory)
-  --model <slug>    override the model
-  --timeout <secs>  default 900
-  --file <path>     attach a file to the brief (repeatable)
-  --here            run in the directory itself instead of a worktree
-  --bg              start and return immediately (run: team wait <id>)
+  team run <agent> "task"          one task, isolated git worktree, patch out
+  team sprint "t1" "codex: t2" ... several tasks at once, one agent each
+  team standup                     who is working right now
+  team ask <agent> "question"      read-only question
+  team panel "question"            the same question to everyone, in parallel
+
+  team board [n]                   the team's shared notes
+  team note <author> "text"        leave a note for the next agent
+  team relay <from> <to> "text"    send one agent a message
+  team crosscheck <id> [--by x]    have another agent review a patch
+
+  team runs [n] | show <id> | diff <id> | apply <id> | drop <id> | wait <id>
+  team suggest [--force|--mute]    offer to bring more AIs in (asked once)
+  team port [--global]             teach Codex/Gemini/opencode to use the team too
+
+Options: --dir <path> --model <slug> --timeout <secs> --file <path> --here --bg
 USAGE
 }
 
 main() {
-  mkdir -p "$RUNS_DIR" "$WT_DIR"
+  mkdir -p "$RUNS_DIR" "$WT_DIR" "$STATE_DIR" "$BOARD_DIR"
   [ ${#ADAPTER_DIRS[@]} -gt 0 ] || die "no adapters found. Reinstall with ./install.sh"
   local cmd="${1:-help}"; shift || true
   case "$cmd" in
-    doctor)       cmd_doctor "$@" ;;
-    agents|team)  cmd_agents "$@" ;;
-    ask)          [ $# -ge 1 ] || die "usage: team ask <agent> \"question\""; cmd_ask "$@" ;;
-    panel)        cmd_panel "$@" ;;
-    run)          [ $# -ge 1 ] || die "usage: team run <agent> \"task\""; cmd_run "$@" ;;
-    runs)         cmd_runs "$@" ;;
-    show)         [ $# -ge 1 ] || die "usage: team show <id>"; cmd_show "$@" ;;
-    diff)         [ $# -ge 1 ] || die "usage: team diff <id>"; cmd_diff "$@" ;;
-    apply)        [ $# -ge 1 ] || die "usage: team apply <id>"; cmd_apply "$@" ;;
-    drop)         [ $# -ge 1 ] || die "usage: team drop <id>"; cmd_drop "$@" ;;
-    wait)         [ $# -ge 1 ] || die "usage: team wait <id>"; cmd_wait "$@" ;;
+    doctor)      cmd_doctor "$@" ;;
+    agents|team) cmd_agents "$@" ;;
+    hire)        cmd_hire "$@" ;;
+    quota)       cmd_quota "$@" ;;
+    ask)         [ $# -ge 1 ] || die "usage: team ask <agent> \"question\""; cmd_ask "$@" ;;
+    panel)       cmd_panel "$@" ;;
+    run)         [ $# -ge 1 ] || die "usage: team run <agent> \"task\""; cmd_run "$@" ;;
+    sprint)      cmd_sprint "$@" ;;
+    standup)     cmd_standup "$@" ;;
+    board)       cmd_board "$@" ;;
+    note)        [ $# -ge 2 ] || die "usage: team note <author> \"text\""; cmd_note "$@" ;;
+    relay)       [ $# -ge 3 ] || die "usage: team relay <from> <to> \"text\""; cmd_relay "$@" ;;
+    crosscheck)  [ $# -ge 1 ] || die "usage: team crosscheck <id>"; cmd_crosscheck "$@" ;;
+    runs)        cmd_runs "$@" ;;
+    show)        [ $# -ge 1 ] || die "usage: team show <id>"; cmd_show "$@" ;;
+    diff)        [ $# -ge 1 ] || die "usage: team diff <id>"; cmd_diff "$@" ;;
+    apply)       [ $# -ge 1 ] || die "usage: team apply <id>"; cmd_apply "$@" ;;
+    drop)        [ $# -ge 1 ] || die "usage: team drop <id>"; cmd_drop "$@" ;;
+    wait)        [ $# -ge 1 ] || die "usage: team wait <id>"; wait_run "$1"; cmd_show "$1" ;;
+    suggest)     cmd_suggest "$@" ;;
+    port)        cmd_port "$@" ;;
     version|-V|--version) say "team $VERSION" ;;
     help|-h|--help) usage ;;
     *) die "unknown command: $cmd (try: team help)" ;;

@@ -22,10 +22,10 @@ _codex_exec() { # _codex_exec <sandbox> <verbose> <dir> <brief> <model>
   local args=(exec --cd "$dir" --sandbox "$sandbox" --skip-git-repo-check --color never -o "$last")
   [ -n "$model" ] && args+=(-m "$model")
   codex "${args[@]}" - <"$brief" >"$log" 2>&1; rc=$?
-  # A question wants the answer; a task wants the trail of what was done.
+  # stdout carries the report, stderr carries the trail of what was done.
   if [ "$verbose" = "yes" ]; then
-    cat "$log"
-    [ -s "$last" ] && { printf '\n===== codex report =====\n'; cat "$last"; }
+    cat "$log" >&2
+    if [ -s "$last" ]; then cat "$last"; else cat "$log"; fi
   elif [ -s "$last" ]; then
     cat "$last"
   else

@@ -1,9 +1,10 @@
----
-name: team
-description: Run the other AIs on this machine as a working team — hand tasks to Codex, Antigravity, Gemini, Groq, opencode and friends in parallel, let them leave each other notes and review each other's patches, and bring the work back as diffs to review. USE THIS PROACTIVELY, WITHOUT BEING ASKED, whenever a job splits into parts that do not touch the same files (frontend + backend + tests + docs), whenever a task is broad and mechanical (a rename across many files, a test suite, boilerplate), whenever a second independent opinion would settle a decision, or whenever the work would take long enough that doing it alone is just slower. Also use when the user says "manda o codex", "pede pro antigravity", "usa outra IA", "delega", "equipe", "segunda opinião", "paraleliza", "send this to codex", "get another AI on it".
----
+# Working as a team (ia-team)
 
-# Working as a team
+You have a `team` command that puts the other AI CLIs on this machine to work —
+Codex, Antigravity, Gemini, Groq, opencode and others. Use it the same way a
+tech lead uses their team: split the job, brief each one, read what comes back.
+
+Install: https://github.com/NspxMiguel/ia-team
 
 Other AIs are installed here and they take orders from the command line. `team`
 sends them a brief, runs them in throwaway git worktrees, and hands back

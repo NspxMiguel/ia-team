@@ -297,6 +297,23 @@
       border-bottom: 1px solid var(--card-border);
     }
 
+    tr.table-category td {
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: var(--accent-blue);
+      background-color: rgba(88, 166, 255, 0.08);
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      padding: 0.75rem 1.25rem;
+      border-bottom: 1px solid var(--card-border);
+      border-top: 1px solid var(--card-border);
+    }
+
+    tr.table-category:hover td {
+      background-color: rgba(88, 166, 255, 0.12);
+    }
+
     td {
       padding: 1rem 1.25rem;
       border-bottom: 1px solid var(--card-border);
@@ -435,7 +452,7 @@
       <section class="hero">
         <h1 class="hero-title">ia-team<span>.</span></h1>
         <p class="hero-tagline">
-          Põe as outras IAs de linha de comando da sua máquina para trabalhar — e devolve o que elas fizeram como um patch para revisar antes de encostar no seu repositório.
+          Põe as outras IAs de linha de comando e de API da sua máquina para trabalhar — e devolve o que elas fizeram como um patch para revisar antes de encostar no seu repositório.
         </p>
 
         <div class="install-box">
@@ -462,20 +479,41 @@
       </section>
 
       <section>
+        <h2 class="section-title">Sprint em Paralelo</h2>
+        <p class="section-desc">
+          Dispare múltiplos agentes ao mesmo tempo em tarefas que não tocam os mesmos arquivos. Cada um trabalha em sua própria worktree descartável e em paralelo.
+        </p>
+        <div class="terminal-window">
+          <div class="terminal-header">
+            <span class="dot dot-red"></span>
+            <span class="dot dot-yellow"></span>
+            <span class="dot dot-green"></span>
+            <span class="terminal-title">bash — ia-team</span>
+          </div>
+          <div class="terminal-body">
+            <pre><code><div class="cmd-line"><span class="cmd-prompt">$</span><span class="cmd-text">team sprint <span class="cmd-arg">"antigravity: a landing"</span> <span class="cmd-arg">"codex: a API"</span> <span class="cmd-arg">"groq: os testes"</span> <span class="cmd-arg">"gemini: os docs"</span></span></div></code></pre>
+          </div>
+        </div>
+      </section>
+
+      <section>
         <h2 class="section-title">O Time</h2>
         <p class="section-desc">
-          O <code>ia-team</code> não traz modelo próprio — ele dirige os agentes CLI que já estão instalados e logados na sua máquina.
+          O <code>ia-team</code> não traz modelo próprio — ele dirige os agentes instalados via CLI e os serviços conectados por API.
         </p>
         <div class="table-wrapper">
           <table>
             <thead>
               <tr>
                 <th>Adaptador</th>
-                <th>Roda</th>
+                <th>Roda / Integrador</th>
                 <th>Especialidade</th>
               </tr>
             </thead>
             <tbody>
+              <tr class="table-category">
+                <td colspan="3">CLI instaladas</td>
+              </tr>
               <tr>
                 <td class="agent-name">codex</td>
                 <td class="agent-cmd">codex exec</td>
@@ -487,6 +525,11 @@
                 <td class="agent-goodat">Interface, landing page, CSS, protótipo rápido</td>
               </tr>
               <tr>
+                <td class="agent-name">gemini</td>
+                <td class="agent-cmd">gemini -p</td>
+                <td class="agent-goodat">Documento longo, pesquisa e análise de código amplo</td>
+              </tr>
+              <tr>
                 <td class="agent-name">claude</td>
                 <td class="agent-cmd">claude -p (Haiku)</td>
                 <td class="agent-goodat">Segunda leitura de um diff, varredura barata</td>
@@ -494,20 +537,83 @@
               <tr>
                 <td class="agent-name">opencode</td>
                 <td class="agent-cmd">opencode run</td>
-                <td class="agent-goodat">A opinião de outro provedor</td>
+                <td class="agent-goodat">A opinião de outro provedor via CLI</td>
               </tr>
               <tr>
                 <td class="agent-name">cursor</td>
                 <td class="agent-cmd">cursor-agent -p</td>
                 <td class="agent-goodat">Frontend, mudança espalhada em muitos arquivos</td>
               </tr>
+              <tr class="table-category">
+                <td colspan="3">Por API</td>
+              </tr>
               <tr>
-                <td class="agent-name">gemini</td>
-                <td class="agent-cmd">gemini -p</td>
-                <td class="agent-goodat">Documento longo, pesquisa</td>
+                <td class="agent-name">groq</td>
+                <td class="agent-cmd">groq API</td>
+                <td class="agent-goodat">Execução ultra-rápida para tarefas em lote e suíte de testes</td>
+              </tr>
+              <tr>
+                <td class="agent-name">nvidia</td>
+                <td class="agent-cmd">nvidia API</td>
+                <td class="agent-goodat">Modelos abertos de alto desempenho em infraestrutura Nvidia</td>
+              </tr>
+              <tr>
+                <td class="agent-name">openrouter</td>
+                <td class="agent-cmd">openrouter API</td>
+                <td class="agent-goodat">Acesso unificado a diversos modelos e provedores independentes</td>
+              </tr>
+              <tr>
+                <td class="agent-name">cerebras</td>
+                <td class="agent-cmd">cerebras API</td>
+                <td class="agent-goodat">Inferência de altíssima velocidade para código e tarefas repetitivas</td>
+              </tr>
+              <tr>
+                <td class="agent-name">mistral</td>
+                <td class="agent-cmd">mistral API</td>
+                <td class="agent-goodat">Raciocínio conciso, backend e geração de código</td>
+              </tr>
+              <tr>
+                <td class="agent-name">together</td>
+                <td class="agent-cmd">together API</td>
+                <td class="agent-goodat">Catálogo amplo de modelos open-source de ponta</td>
+              </tr>
+              <tr>
+                <td class="agent-name">deepseek</td>
+                <td class="agent-cmd">deepseek API</td>
+                <td class="agent-goodat">Raciocínio profundo, lógica complexa e resolução de bugs difíceis</td>
               </tr>
             </tbody>
           </table>
+        </div>
+      </section>
+
+      <section>
+        <h2 class="section-title">Comunicação da Equipe</h2>
+        <p class="section-desc">
+          Os agentes trocam informações no quadro do projeto e revisam o trabalho dos colegas antes da entrega.
+        </p>
+        <div class="info-card">
+          <p>
+            <strong>team note:</strong> Define diretrizes e contratos de API no quadro compartilhado do projeto antes dos agentes iniciarem o trabalho (ex: <code>team note lead "o contrato de rotas está no README"</code>).
+          </p>
+          <p>
+            <strong>team relay:</strong> Envia recados e passa o bastão diretamente entre os agentes sobre o progresso das tarefas (ex: <code>team relay lead codex "antigravity terminou o frontend"</code>).
+          </p>
+          <p>
+            <strong>team crosscheck:</strong> Solicita que um modelo diferente faça a revisão cruzada do patch (ex: <code>team crosscheck &lt;id&gt; --by claude</code>), descobrindo bugs e pontos cegos antes da aplicação.
+          </p>
+        </div>
+      </section>
+
+      <section>
+        <h2 class="section-title">Detecção de Cota</h2>
+        <div class="info-card">
+          <p>
+            Quando o limite de requisições ou a cota de saldo/free tier de um agente se esgota durante a execução, o <code>ia-team</code> detecta a falha imediatamente.
+          </p>
+          <p>
+            O agente pausado é temporariamente colocado no banco de reservas, e a sua tarefa é <strong>reencaminhada para outro agente disponível sozinho</strong>. A execução continua de forma transparente sem interromper o andamento do projeto. Você pode acompanhar quem está pausado com <code>team quota</code>.
+          </p>
         </div>
       </section>
 

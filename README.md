@@ -1,17 +1,20 @@
 # ia-team
 
-Put the other agentic CLIs on your machine to work, and review what they bring
-back before it touches your repository.
+Put the other AIs on your machine to work as a team — in parallel, talking to
+each other — and review what they bring back before it touches your repository.
 
-Claude Code stays the lead: it writes the brief, sends the task to whichever
-agent fits, and reads the diff. The other agent works in a throwaway git
-worktree, so nothing lands on your branch until the patch is applied on purpose.
+Claude Code (or whoever runs `team`) stays the lead: it splits the job, writes
+the briefs, and reads every diff. Each agent works in a throwaway git worktree,
+so nothing lands on your branch until a patch is applied on purpose.
 
 ```bash
-team run antigravity "redo the landing page hero: premium feel, no framework"
-team diff antigravity-20260821-132212
-team apply antigravity-20260821-132212
+team sprint "antigravity: the landing page, dark, no framework" \
+            "codex: the /api/links route following README.md" \
+            "groq: node:test tests for the four routes" \
+            "gemini: docs/COMO-USAR.md with curl examples"
 ```
+
+Four agents, four worktrees, four patches — in the time the slowest one takes.
 
 ## Install
 
@@ -19,72 +22,109 @@ team apply antigravity-20260821-132212
 curl -fsSL https://raw.githubusercontent.com/NspxMiguel/ia-team/main/install.sh | bash
 ```
 
-Installs three things: the `team` command in `~/.local/bin`, the adapters in
-`~/.ia-team/agents`, and a `team` skill for Claude Code in
-`~/.claude/skills/team`. Requires `git` and `python3`, nothing else.
+Installs the `team` command in `~/.local/bin`, the adapters and the API runner
+in `~/.ia-team`, and a `team` skill for Claude Code in `~/.claude/skills/team`.
+Requires `git` and `python3`, nothing else.
 
 ## The roster
 
-`team` does not ship a model — it drives whatever is already installed and
-signed in. `team doctor` reports the state of each one.
+`team` ships no model of its own. It drives the CLIs already installed, and any
+OpenAI-compatible API you have a key for. `team doctor` reports who is actually
+available right now.
+
+**Command-line teammates**
 
 | Adapter | Runs | Good at |
 | --- | --- | --- |
-| `codex` | `codex exec` | Big refactors, backend, tests, following a spec literally |
+| `codex` | `codex exec` | Big refactors, backend, following a spec literally |
 | `antigravity` | `agy -p` | UI, landing pages, CSS, quick prototypes |
-| `claude` | `claude -p` (Haiku) | A second read of a diff, wide cheap sweeps |
-| `opencode` | `opencode run` | A different provider's opinion |
+| `gemini` | `gemini -p` | Huge context, long documents, docs |
+| `claude` | `claude -p` (Haiku) | A second read of a diff, cheap wide sweeps |
+| `opencode` | `opencode run` | Another provider's opinion |
 | `cursor` | `cursor-agent -p` | Frontend, edits spread across many files |
-| `gemini` | `gemini -p` | Long documents, research |
 
-Adding one more is a file in `~/.ia-team/agents` with four functions —
-`adapter_probe`, `adapter_ask`, `adapter_run`, plus its metadata. Copy
-`agents/codex.sh` and change the command.
+**API teammates** — a small agent loop (`runner/cloud_agent.py`) gives them file
+tools, so they edit the repository instead of describing a patch:
+
+| Adapter | Free tier | Good at |
+| --- | --- | --- |
+| `groq` | yes | Bulk work and tests, answers in seconds |
+| `nvidia` | yes | Reasoning, a second architecture opinion |
+| `openrouter` | yes | Breadth: many vendors behind one key |
+| `cerebras` | yes | The fastest of the lot, repetitive edits |
+| `mistral` | yes | Refactors, code completion |
+| `together` | free credit | Open models, parallel bulk work |
+| `deepseek` | paid, cheap | Hard reasoning, long refactors |
+
+`team hire` prints what is missing and how to get it. Keys are read from the
+environment, or from your OS keychain through
+[`claude-autonomous secret`](https://github.com/NspxMiguel/claude-autonomous) —
+they never pass through the agent's context.
 
 ## Commands
 
 ```
-team doctor                     who is installed and signed in
-team agents                     the roster and what each one is good at
-team ask <agent> "question"     read-only question — no file is touched
-team panel "question"           the same question to everyone, in parallel
-team run <agent> "task"         real task in an isolated git worktree
-team runs [n]                   recent runs
-team show <id>                  brief, report and patch summary
-team diff <id>                  the full patch
-team apply <id>                 apply the patch to your working tree
-team drop <id>                  throw the run and its worktree away
-team wait <id>                  block until a --bg run finishes
+team doctor                      who is available, signed in, and has quota
+team agents                      the roster and what each one is good at
+team hire [name]                 how to add someone who is not set up yet
+team quota [--clear [agent]]     who is benched, and until when
+
+team run <agent> "task"          one task, isolated worktree, patch out
+team sprint "t1" "codex: t2" ... several tasks at once, one agent each
+team standup                     who is working right now
+team ask <agent> "question"      read-only question
+team panel "question"            the same question to everyone, in parallel
+
+team board [n]                   the team's shared notes
+team note <author> "text"        leave a note for the next agent
+team relay <from> <to> "text"    send one agent a message
+team crosscheck <id> [--by x]    have another agent review a patch
+
+team runs | show | diff | apply | drop | wait
+team suggest [--force|--mute]    offer to bring more AIs in (asked once)
+team port [--global]             teach Codex/Gemini/opencode to use the team too
 ```
 
-Flags for `ask`, `panel` and `run`: `--dir <path>`, `--model <slug>`,
-`--timeout <secs>` (default 900), `--file <path>` to attach a spec or a mockup
-(repeatable), `--here` to work in the directory itself, `--bg` to start and
-return immediately.
+Options for `run`, `sprint`, `ask` and `panel`: `--dir`, `--model`, `--timeout`
+(default 900s), `--file` to attach a spec or mockup, `--here` to skip the
+worktree, `--bg` to start and keep working.
 
 ## How a run works
 
-1. `git worktree add` from `HEAD` into `~/.ia-team/worktrees/<id>`, on a
-   `team/<agent>/<stamp>` branch. Uncommitted changes are carried over, so the
-   agent sees the tree you see.
-2. A brief is written: your task, plus the working agreement — stay in the
-   directory, do not commit, do not push, match the existing style, report at
-   the end.
-3. The agent runs headless under a timeout. Everything is kept in
-   `~/.ia-team/runs/<id>`: `brief.md`, `log.txt`, `patch.diff`, `meta.json`.
-4. `team show` summarises, `team diff` gives you the patch, `team apply` stages
-   it in the real repository, `team drop` erases the whole attempt.
+1. `git worktree add` from `HEAD` into `~/.ia-team/worktrees/<id>`. Uncommitted
+   changes are carried over and frozen as a starting commit, so the patch that
+   comes back is the agent's work and nothing else.
+2. A brief is written: the task, the working agreement (stay here, do not run
+   git, match the existing style), the recent board notes, and any message
+   addressed to that agent.
+3. The agent runs headless under a timeout. `~/.ia-team/runs/<id>` keeps
+   `brief.md`, `report.md`, `log.txt`, `patch.diff` and `meta.json`.
+4. The report goes on the board, and anything the agent flagged with `TIP:`
+   reaches the rest of the team.
 
-Nothing is committed or pushed by an agent. Publishing stays a human decision.
+Nothing is committed or pushed by an agent — and if one commits inside its own
+worktree anyway, the patch is still captured, because the diff is taken against
+the starting commit.
 
-## Costs and limits
+## Running out of quota
 
-Every run spends the quota of the agent you sent it to — `team panel` spends
-four at once. Sending two agents at the same files produces two patches that
-conflict; parallelism is for disjoint work.
+Free tiers end mid-job. The API runner waits out per-minute rate limits and
+carries on; when an agent is genuinely out — credits gone, plan cap hit — it is
+benched with a timer and the work is handed to someone else automatically.
 
-Briefs are plain files on disk that are sent to another vendor's model: point at
-secrets by variable name, never paste values.
+```bash
+team quota                # who is benched and until when
+team quota --clear groq   # put them back early
+```
+
+## Working in parallel without stepping on each other
+
+Split by files, not by feelings: two agents in the same file produce two patches
+that fight. `team sprint` reports overlapping files when it happens.
+
+Write the contract first — one `team note` with the routes, file names and
+signatures — and four agents build against the same interface instead of
+inventing four.
 
 ## Tests
 
@@ -92,8 +132,9 @@ secrets by variable name, never paste values.
 tests/test.sh
 ```
 
-Covers the parts that do not need a model: adapter discovery, brief generation,
-worktree lifecycle, patch capture, apply and drop.
+49 checks over the parts that do not need a model: adapters, briefs, worktrees,
+patch capture (including from an agent that commits), the board, relays,
+sprints, quota benching and hand-off, the once-only suggestion, and porting.
 
 ## License
 
