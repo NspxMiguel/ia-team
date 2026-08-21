@@ -173,6 +173,13 @@ def tool_schema(readonly):
     return tools
 
 
+class TooLarge(Exception):
+    """The request no longer fits the provider's per-request budget.
+
+    Free tiers are small: the fix is to carry less history, not to give up.
+    """
+
+
 class ToolCallRejected(Exception):
     """The provider refused the model's tool call (bad JSON, too long).
 
@@ -234,6 +241,9 @@ def call_api(base_url, key, model, messages, tools, timeout, temperature):
             raise QuotaExhausted("HTTP 429: %s" % detail, retry, hard)
         if exc.code in (401, 402, 403) and any(m in low for m in QUOTA_MARKS):
             raise QuotaExhausted("HTTP %d: %s" % (exc.code, detail), 0, True)
+        if exc.code == 413 or "request too large" in low or "context length" in low \
+                or "too many tokens" in low:
+            raise TooLarge(detail)
         if exc.code == 400 and ("tool_use_failed" in low or "tool call" in low):
             raise ToolCallRejected(detail)
         raise RuntimeError("HTTP %d: %s" % (exc.code, detail))
@@ -309,6 +319,7 @@ def main():
     nudges = 0
     seen_calls = {}     # the same call, over and over, means the model is stuck
     wrote_something = False
+    keep = args.keep
     calls = {"list_files": lambda a: ws.list_files(a.get("subdir", ".")),
              "read_file": lambda a: ws.read_file(a["path"]),
              "write_file": lambda a: ws.write_file(a["path"], a.get("content", "")),
@@ -320,7 +331,7 @@ def main():
         if time.time() > deadline:
             log("[team] out of time after %d steps" % step)
             return 4
-        messages = prune(messages, args.keep)
+        messages = prune(messages, keep)
         data = None
         for attempt in range(6):
             try:
@@ -334,6 +345,13 @@ def main():
                     return 3
                 log("[team] rate limited, waiting %.1fs and carrying on" % wait)
                 time.sleep(wait)
+            except TooLarge as exc:
+                if keep <= 6:
+                    log("[team] the request is too large even with a short history")
+                    return 2
+                keep = max(6, keep // 2)
+                messages = prune(messages, keep)
+                log("[team] request too large — carrying %d messages instead" % keep)
             except ToolCallRejected as exc:
                 nudges += 1
                 if nudges > 4:
