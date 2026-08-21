@@ -1,0 +1,449 @@
+#!/usr/bin/env bash
+# team — delegate work to other agentic CLIs (Codex, Antigravity, opencode, ...)
+# and bring the result back as a reviewable patch.
+#
+#   team doctor                 who is installed and signed in
+#   team agents                 the roster and what each one is good at
+#   team ask <agent> <prompt>   read-only question, no files touched
+#   team panel <prompt>         same question to every available agent
+#   team run <agent> <prompt>   real task, isolated git worktree, patch out
+#   team runs | show | diff | apply | drop | wait
+set -euo pipefail
+
+VERSION="0.1.0"
+TEAM_HOME="${IA_TEAM_HOME:-$HOME/.ia-team}"
+RUNS_DIR="$TEAM_HOME/runs"
+WT_DIR="$TEAM_HOME/worktrees"
+
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do SELF="$(readlink "$SELF")"; done
+SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+
+# Adapters live next to the clone when running from one, in TEAM_HOME once installed.
+ADAPTER_DIRS=()
+[ -d "$SELF_DIR/../agents" ] && ADAPTER_DIRS+=("$(cd "$SELF_DIR/.." && pwd)/agents")
+[ -d "$TEAM_HOME/agents" ] && ADAPTER_DIRS+=("$TEAM_HOME/agents")
+
+# ---------------------------------------------------------------- output ----
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  B=$'\033[1m'; DIM=$'\033[2m'; RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; RST=$'\033[0m'
+else
+  B=""; DIM=""; RED=""; GRN=""; YEL=""; RST=""
+fi
+say()  { printf '%s\n' "$*"; }
+warn() { printf '%s\n' "${YEL}$*${RST}" >&2; }
+die()  { printf '%s\n' "${RED}error:${RST} $*" >&2; exit 1; }
+
+# --------------------------------------------------------------- adapters ---
+adapter_file() {
+  local id="$1" d
+  for d in "${ADAPTER_DIRS[@]:-}"; do
+    [ -f "$d/$id.sh" ] && { printf '%s\n' "$d/$id.sh"; return 0; }
+  done
+  return 1
+}
+
+adapter_ids() {
+  local d f
+  for d in "${ADAPTER_DIRS[@]:-}"; do
+    for f in "$d"/*.sh; do
+      [ -e "$f" ] || continue
+      basename "$f" .sh
+    done
+  done | sort -u
+}
+
+# meta <id> <VAR> -> prints the adapter's variable without polluting this shell
+meta() {
+  local id="$1" var="$2" file
+  file="$(adapter_file "$id")" || return 1
+  ( set +u; . "$file"; printf '%s\n' "${!var:-}" )
+}
+
+probe() { # prints "ok|<detail>", "noauth|<detail>" or "missing|<detail>"
+  local id="$1" file
+  file="$(adapter_file "$id")" || { printf 'missing|no adapter\n'; return; }
+  ( set +u; . "$file"; adapter_probe )
+}
+
+# ------------------------------------------------------------------ utils ---
+now_id() { printf '%s-%s' "$1" "$(date +%Y%m%d-%H%M%S)"; }
+
+run_limited() { # run_limited <seconds> <logfile> <command...>
+  local secs="$1" log="$2"; shift 2
+  set +m   # no "Terminated" chatter when we time an agent out
+  ( "$@" >"$log" 2>&1 ) &
+  local pid=$! waited=0 rc=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$secs" ]; then
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep 2
+      kill -KILL "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      printf '\n[team] gave up after %ss\n' "$secs" >>"$log"
+      return 124
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+  wait "$pid" 2>/dev/null; rc=$?
+  return $rc
+}
+
+git_root() { git -C "$1" rev-parse --show-toplevel 2>/dev/null; }
+
+json_meta() { # json_meta <file> key value key value ...
+  local file="$1"; shift
+  python3 - "$file" "$@" <<'PY'
+import json, os, sys
+path, rest = sys.argv[1], sys.argv[2:]
+data = {}
+if os.path.exists(path):
+    with open(path) as fh:
+        data = json.load(fh)
+data.update(dict(zip(rest[::2], rest[1::2])))
+with open(path, "w") as fh:
+    json.dump(data, fh, indent=2)
+PY
+}
+
+json_get() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2],""))' "$1" "$2" 2>/dev/null || true; }
+
+# ----------------------------------------------------------------- briefs ---
+write_brief() { # write_brief <outfile> <mode> <dir> <prompt> [attachments...]
+  local out="$1" mode="$2" dir="$3" prompt="$4"; shift 4
+  {
+    printf '# Task\n\n%s\n\n' "$prompt"
+    printf '# Working agreement\n\n'
+    printf -- '- Working directory: `%s`. Everything you need is there; stay inside it.\n' "$dir"
+    if [ "$mode" = "ask" ]; then
+      printf -- '- READ ONLY. Do not create, edit or delete any file. Answer in text.\n'
+    else
+      printf -- '- You are on a throwaway git branch. Edit files freely, but do NOT commit, push, or run git checkout/reset.\n'
+      printf -- '- Do not touch files unrelated to the task.\n'
+      printf -- '- Do not add dependencies unless the task says so.\n'
+    fi
+    printf -- '- Match the style, language and conventions already in the code.\n'
+    printf -- '- If the task is ambiguous, pick the most conventional reading, do it, and say what you assumed.\n'
+    printf -- '- Finish with a short report: what you changed, which files, what you did not do.\n'
+    local f
+    for f in "$@"; do
+      [ -f "$f" ] || continue
+      printf '\n# Attachment: %s\n\n```\n' "$(basename "$f")"
+      cat "$f"
+      printf '\n```\n'
+    done
+  } >"$out"
+}
+
+# -------------------------------------------------------------- commands ----
+cmd_agents() {
+  local id label tags st state detail
+  printf '%s\n' "${B}roster${RST}"
+  for id in $(adapter_ids); do
+    label="$(meta "$id" ADAPTER_LABEL)"
+    tags="$(meta "$id" ADAPTER_TAGS)"
+    st="$(probe "$id")"; state="${st%%|*}"; detail="${st#*|}"
+    case "$state" in
+      ok)      printf '  %s%-12s%s %s\n' "$GRN" "$id" "$RST" "$label" ;;
+      noauth)  printf '  %s%-12s%s %s %s(%s)%s\n' "$YEL" "$id" "$RST" "$label" "$DIM" "$detail" "$RST" ;;
+      *)       printf '  %s%-12s%s %s %s(%s)%s\n' "$DIM" "$id" "$RST" "$label" "$DIM" "$detail" "$RST" ;;
+    esac
+    [ -n "$tags" ] && printf '               %sgood at: %s%s\n' "$DIM" "$tags" "$RST"
+  done
+}
+
+cmd_doctor() {
+  local id st state detail bin ok=0
+  printf '%s\n' "${B}team doctor${RST} (v$VERSION)"
+  printf '  home: %s\n\n' "$TEAM_HOME"
+  for id in $(adapter_ids); do
+    st="$(probe "$id")"; state="${st%%|*}"; detail="${st#*|}"
+    bin="$(meta "$id" ADAPTER_BIN)"
+    case "$state" in
+      ok)     printf '  %s✓%s %-12s %s\n' "$GRN" "$RST" "$id" "$detail"; ok=$((ok+1)) ;;
+      noauth) printf '  %s!%s %-12s %s\n' "$YEL" "$RST" "$id" "$detail" ;;
+      *)      printf '  %s·%s %-12s %s\n' "$DIM" "$RST" "$id" "$detail"
+              printf '      %sinstall: %s%s\n' "$DIM" "$(meta "$id" ADAPTER_INSTALL)" "$RST" ;;
+    esac
+  done
+  printf '\n  %s ready, %s adapters total\n' "$ok" "$(adapter_ids | wc -l | tr -d ' ')"
+  [ "$ok" -eq 0 ] && return 1 || return 0
+}
+
+parse_common() { # sets DIR MODEL TIMEOUT ATTACH[] BG PLACE, leaves REST[]
+  DIR="$PWD"; MODEL=""; TIMEOUT=900; BG=0; PLACE="worktree"; ATTACH=(); REST=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dir)      DIR="$2"; shift 2 ;;
+      --model|-m) MODEL="$2"; shift 2 ;;
+      --timeout)  TIMEOUT="$2"; shift 2 ;;
+      --file|-f)  ATTACH+=("$2"); shift 2 ;;
+      --here)     PLACE="here"; shift ;;
+      --worktree) PLACE="worktree"; shift ;;
+      --bg)       BG=1; shift ;;
+      --)         shift; REST+=("$@"); break ;;
+      -*)         die "unknown option: $1" ;;
+      *)          REST+=("$1"); shift ;;
+    esac
+  done
+  DIR="$(cd "$DIR" && pwd)"
+}
+
+cmd_ask() {
+  local agent="$1"; shift
+  parse_common "$@"
+  local prompt="${REST[*]:-}"
+  [ -n "$prompt" ] || die "nothing to ask. usage: team ask <agent> \"question\""
+  local st; st="$(probe "$agent")"
+  [ "${st%%|*}" = "ok" ] || die "$agent is not ready: ${st#*|}"
+
+  local id dir_run; id="$(now_id "$agent")"; dir_run="$RUNS_DIR/$id"
+  mkdir -p "$dir_run"
+  write_brief "$dir_run/brief.md" ask "$DIR" "$prompt" "${ATTACH[@]:-}"
+  json_meta "$dir_run/meta.json" id "$id" agent "$agent" mode ask dir "$DIR" \
+            model "$MODEL" status running prompt "$prompt"
+
+  local file; file="$(adapter_file "$agent")"
+  set +e
+  run_limited "$TIMEOUT" "$dir_run/answer.md" \
+    bash -c 'set +u; . "$1"; adapter_ask "$2" "$3" "$4"' _ "$file" "$DIR" "$dir_run/brief.md" "$MODEL"
+  local rc=$?
+  set -e
+  json_meta "$dir_run/meta.json" status "$([ $rc -eq 0 ] && echo done || echo failed)" exit "$rc"
+  cat "$dir_run/answer.md"
+  [ $rc -ne 0 ] && warn "$agent exited with $rc (run $id)"
+  printf '\n%srun %s%s\n' "$DIM" "$id" "$RST"
+  return 0
+}
+
+cmd_panel() {
+  parse_common "$@"
+  local prompt="${REST[*]:-}"
+  [ -n "$prompt" ] || die "nothing to ask. usage: team panel \"question\""
+  local id base; id="$(now_id panel)"; base="$RUNS_DIR/$id"
+  mkdir -p "$base"
+  write_brief "$base/brief.md" ask "$DIR" "$prompt" "${ATTACH[@]:-}"
+
+  local agents=() a st
+  for a in $(adapter_ids); do
+    st="$(probe "$a")"; [ "${st%%|*}" = "ok" ] && agents+=("$a")
+  done
+  [ ${#agents[@]} -gt 0 ] || die "nobody available. run: team doctor"
+
+  say "${B}panel${RST}: asking ${agents[*]} in parallel"
+  local pids=()
+  for a in "${agents[@]}"; do
+    local f; f="$(adapter_file "$a")"
+    ( run_limited "$TIMEOUT" "$base/$a.md" \
+        bash -c 'set +u; . "$1"; adapter_ask "$2" "$3" "$4"' _ "$f" "$DIR" "$base/brief.md" "$MODEL" ) &
+    pids+=($!)
+  done
+  local p; for p in "${pids[@]}"; do wait "$p" || true; done
+
+  for a in "${agents[@]}"; do
+    printf '\n%s──── %s ────%s\n' "$B" "$a" "$RST"
+    if [ -s "$base/$a.md" ]; then
+      cat "$base/$a.md"
+    else
+      printf '%s(no answer — timed out or errored)%s\n' "$DIM" "$RST"
+    fi
+  done
+  printf '\n%spanel %s%s\n' "$DIM" "$id" "$RST"
+}
+
+cmd_run() {
+  local agent="$1"; shift
+  parse_common "$@"
+  local prompt="${REST[*]:-}"
+  [ -n "$prompt" ] || die "no task given. usage: team run <agent> \"task\""
+  local st; st="$(probe "$agent")"
+  [ "${st%%|*}" = "ok" ] || die "$agent is not ready: ${st#*|}"
+
+  local id dir_run; id="$(now_id "$agent")"; dir_run="$RUNS_DIR/$id"
+  mkdir -p "$dir_run"
+
+  local root work branch=""
+  root="$(git_root "$DIR" || true)"
+  if [ -n "$root" ] && [ "$PLACE" = "worktree" ]; then
+    branch="team/$agent/${id##*-}"
+    work="$WT_DIR/$id"
+    mkdir -p "$WT_DIR"
+    git -C "$root" worktree add -q -b "$branch" "$work" HEAD \
+      || die "could not create the worktree (uncommitted rebase? branch in use?)"
+    # carry uncommitted work over so the agent sees the same tree you see
+    if ! git -C "$root" diff --quiet HEAD 2>/dev/null; then
+      git -C "$root" diff HEAD | git -C "$work" apply --allow-empty - || warn "could not carry local changes into the worktree"
+    fi
+    say "${DIM}worktree $work (branch $branch)${RST}"
+  else
+    work="$DIR"
+    [ -n "$root" ] || warn "$DIR is not a git repo — no patch will be produced"
+  fi
+
+  write_brief "$dir_run/brief.md" run "$work" "$prompt" "${ATTACH[@]:-}"
+  json_meta "$dir_run/meta.json" id "$id" agent "$agent" mode run dir "$DIR" \
+            work "$work" root "${root:-}" branch "$branch" model "$MODEL" \
+            place "$PLACE" status running prompt "$prompt"
+
+  local file; file="$(adapter_file "$agent")"
+  _finish_run() {
+    local rc="$1"
+    if [ -n "$root" ]; then
+      git -C "$work" add -A >/dev/null 2>&1 || true
+      git -C "$work" diff --cached --binary >"$dir_run/patch.diff" 2>/dev/null || true
+      git -C "$work" reset -q >/dev/null 2>&1 || true
+      json_meta "$dir_run/meta.json" \
+        files "$(git -C "$work" diff --name-only HEAD 2>/dev/null | wc -l | tr -d ' ')"
+    fi
+    json_meta "$dir_run/meta.json" status "$([ "$rc" -eq 0 ] && echo done || echo failed)" exit "$rc"
+  }
+
+  if [ "$BG" -eq 1 ]; then
+    (
+      set +e
+      run_limited "$TIMEOUT" "$dir_run/log.txt" \
+        bash -c 'set +u; . "$1"; adapter_run "$2" "$3" "$4"' _ "$file" "$work" "$dir_run/brief.md" "$MODEL"
+      _finish_run $?
+    ) >/dev/null 2>&1 &
+    say "${B}$agent${RST} started in the background — run ${B}team wait $id${RST}"
+    printf '%s\n' "$id"
+    return 0
+  fi
+
+  say "${B}$agent${RST} is working… (timeout ${TIMEOUT}s)"
+  set +e
+  run_limited "$TIMEOUT" "$dir_run/log.txt" \
+    bash -c 'set +u; . "$1"; adapter_run "$2" "$3" "$4"' _ "$file" "$work" "$dir_run/brief.md" "$MODEL"
+  local rc=$?
+  set -e
+  _finish_run "$rc"
+  cmd_show "$id"
+  [ "$rc" -ne 0 ] && warn "$agent exited with $rc — see $dir_run/log.txt"
+  return 0
+}
+
+cmd_wait() {
+  local id="$1" dir_run="$RUNS_DIR/$1"
+  [ -d "$dir_run" ] || die "unknown run: $id"
+  local status
+  while :; do
+    status="$(json_get "$dir_run/meta.json" status)"
+    [ "$status" != "running" ] && break
+    sleep 3
+  done
+  cmd_show "$id"
+}
+
+cmd_runs() {
+  [ -d "$RUNS_DIR" ] || { say "no runs yet"; return 0; }
+  local d id status agent files
+  for d in $(ls -1t "$RUNS_DIR" 2>/dev/null | head -"${1:-20}"); do
+    id="$d"
+    status="$(json_get "$RUNS_DIR/$d/meta.json" status)"
+    agent="$(json_get "$RUNS_DIR/$d/meta.json" agent)"
+    files="$(json_get "$RUNS_DIR/$d/meta.json" files)"
+    case "$status" in
+      done)    printf '  %s✓%s %-30s %-10s %s files\n' "$GRN" "$RST" "$id" "$agent" "${files:-0}" ;;
+      running) printf '  %s…%s %-30s %-10s\n' "$YEL" "$RST" "$id" "$agent" ;;
+      *)       printf '  %s✗%s %-30s %-10s %s\n' "$RED" "$RST" "$id" "$agent" "$status" ;;
+    esac
+  done
+}
+
+cmd_show() {
+  local id="$1" d="$RUNS_DIR/$1"
+  [ -d "$d" ] || die "unknown run: $id"
+  local agent status; agent="$(json_get "$d/meta.json" agent)"; status="$(json_get "$d/meta.json" status)"
+  printf '\n%s%s%s  %s  %s\n' "$B" "$id" "$RST" "$agent" "$status"
+  if [ -s "$d/answer.md" ]; then cat "$d/answer.md"; fi
+  if [ -s "$d/log.txt" ]; then
+    printf '\n%s─ report ─%s\n' "$DIM" "$RST"
+    tail -30 "$d/log.txt"
+  fi
+  if [ -s "$d/patch.diff" ]; then
+    printf '\n%s─ patch ─%s\n' "$DIM" "$RST"
+    git apply --numstat "$d/patch.diff" 2>/dev/null | awk '{printf "  +%-6s -%-6s %s\n", $1, $2, $3}'
+    printf '\n  %steam diff %s%s   %steam apply %s%s   %steam drop %s%s\n' \
+      "$DIM" "$id" "$RST" "$DIM" "$id" "$RST" "$DIM" "$id" "$RST"
+  else
+    printf '\n  %sno file changes%s\n' "$DIM" "$RST"
+  fi
+}
+
+cmd_diff() {
+  local d="$RUNS_DIR/$1"
+  [ -s "$d/patch.diff" ] || die "run $1 produced no patch"
+  cat "$d/patch.diff"
+}
+
+cmd_apply() {
+  local id="$1" d="$RUNS_DIR/$1"
+  [ -s "$d/patch.diff" ] || die "run $id produced no patch"
+  local root; root="$(json_get "$d/meta.json" root)"
+  [ -n "$root" ] || die "run $id has no repository recorded"
+  git -C "$root" apply --3way "$d/patch.diff" \
+    && say "${GRN}applied${RST} $id into $root — review with: git -C $root diff" \
+    || die "the patch did not apply cleanly. Inspect it with: team diff $id"
+}
+
+cmd_drop() {
+  local id="$1" d="$RUNS_DIR/$1"
+  [ -d "$d" ] || die "unknown run: $id"
+  local root work branch
+  root="$(json_get "$d/meta.json" root)"; work="$(json_get "$d/meta.json" work)"; branch="$(json_get "$d/meta.json" branch)"
+  if [ -n "$root" ] && [ -n "$branch" ] && [ -d "$work" ]; then
+    git -C "$root" worktree remove --force "$work" 2>/dev/null || rm -rf "$work"
+    git -C "$root" branch -D "$branch" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$d"
+  say "dropped $id"
+}
+
+usage() {
+  cat <<'USAGE'
+team — put the other agentic CLIs to work and review what they bring back
+
+  team doctor                     who is installed and signed in
+  team agents                     the roster and what each one is good at
+  team ask <agent> "question"     read-only question (no file is touched)
+  team panel "question"           the same question to everyone, in parallel
+  team run <agent> "task"         real task in an isolated git worktree
+  team runs [n]                   recent runs
+  team show <id>                  brief, report and patch summary
+  team diff <id>                  the full patch
+  team apply <id>                 apply the patch to your working tree
+  team drop <id>                  throw the run and its worktree away
+  team wait <id>                  block until a --bg run finishes
+
+Options for ask/panel/run:
+  --dir <path>      where to work (default: current directory)
+  --model <slug>    override the model
+  --timeout <secs>  default 900
+  --file <path>     attach a file to the brief (repeatable)
+  --here            run in the directory itself instead of a worktree
+  --bg              start and return immediately (run: team wait <id>)
+USAGE
+}
+
+main() {
+  mkdir -p "$RUNS_DIR" "$WT_DIR"
+  [ ${#ADAPTER_DIRS[@]} -gt 0 ] || die "no adapters found. Reinstall with ./install.sh"
+  local cmd="${1:-help}"; shift || true
+  case "$cmd" in
+    doctor)       cmd_doctor "$@" ;;
+    agents|team)  cmd_agents "$@" ;;
+    ask)          [ $# -ge 1 ] || die "usage: team ask <agent> \"question\""; cmd_ask "$@" ;;
+    panel)        cmd_panel "$@" ;;
+    run)          [ $# -ge 1 ] || die "usage: team run <agent> \"task\""; cmd_run "$@" ;;
+    runs)         cmd_runs "$@" ;;
+    show)         [ $# -ge 1 ] || die "usage: team show <id>"; cmd_show "$@" ;;
+    diff)         [ $# -ge 1 ] || die "usage: team diff <id>"; cmd_diff "$@" ;;
+    apply)        [ $# -ge 1 ] || die "usage: team apply <id>"; cmd_apply "$@" ;;
+    drop)         [ $# -ge 1 ] || die "usage: team drop <id>"; cmd_drop "$@" ;;
+    wait)         [ $# -ge 1 ] || die "usage: team wait <id>"; cmd_wait "$@" ;;
+    version|-V|--version) say "team $VERSION" ;;
+    help|-h|--help) usage ;;
+    *) die "unknown command: $cmd (try: team help)" ;;
+  esac
+}
+main "$@"
