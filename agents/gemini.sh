@@ -5,7 +5,7 @@ ADAPTER_LABEL="Gemini CLI (Google, free tier)"
 ADAPTER_KIND="cli"
 ADAPTER_BIN="gemini"
 ADAPTER_TAGS="huge context, long documents, research, docs, reading a whole codebase"
-ADAPTER_INSTALL="npm i -g @google/gemini-cli, then a free key at https://aistudio.google.com/apikey and: pbpaste | claude-autonomous secret import GEMINI_API_KEY"
+ADAPTER_INSTALL="npm i -g @google/gemini-cli, then run gemini once and sign in with Google (about 1000 requests/day). An AI Studio key also works (pbpaste | claude-autonomous secret import GEMINI_API_KEY) but the free tier there is only a handful of requests per day."
 ADAPTER_KEY_ENV="GEMINI_API_KEY"
 
 _gem_key_state() {
