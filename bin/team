@@ -203,6 +203,27 @@ detect_quota() { # detect_quota <agent> <logfile> <exitcode>
       reason="rate limited"; secs=300 ;;
     *) return 1 ;;
   esac
+  # When the provider says when to come back, believe it: a daily budget that
+  # resets in 17 minutes should not be treated like a five-minute throttle.
+  local hinted
+  hinted="$(python3 - "$log" <<'PY'
+import re, sys
+text = open(sys.argv[1], errors="replace").read()[-4000:]
+best = 0
+for amount, unit in re.findall(r"try again in\s*([0-9]+(?:\.[0-9]+)?)\s*(ms|s|m|h)", text, re.I):
+    value = float(amount)
+    unit = unit.lower()
+    seconds = value / 1000 if unit == "ms" else value * 60 if unit == "m" else value * 3600 if unit == "h" else value
+    best = max(best, seconds)
+for minutes, seconds in re.findall(r"try again in\s*([0-9]+)m([0-9.]+)s", text, re.I):
+    best = max(best, int(minutes) * 60 + float(seconds))
+print(int(best))
+PY
+)"
+  if [ "${hinted:-0}" -gt "$secs" ] 2>/dev/null; then
+    secs=$((hinted + 30))
+    reason="$reason (provider said ~$(human_time "$hinted"))"
+  fi
   quota_mark "$agent" "$secs" "$reason"
   warn "$agent is out for now ($reason) — back in $(human_time "$secs"). Work goes to someone else."
   return 0
