@@ -125,8 +125,18 @@
 
     .install-command {
       color: var(--text-primary);
+      font-size: 0.82rem;
       overflow-x: auto;
       white-space: nowrap;
+    }
+
+    /* Below this width the command no longer fits on one line, so it wraps
+       instead of hiding half of itself behind a scrollbar. */
+    @media (max-width: 860px) {
+      .install-command {
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
     }
 
     .install-command .prompt {
@@ -394,6 +404,10 @@
       .install-box {
         flex-direction: column;
         align-items: stretch;
+      }
+      .install-command {
+        white-space: pre-wrap;
+        word-break: break-all;
       }
       .copy-btn {
         text-align: center;
