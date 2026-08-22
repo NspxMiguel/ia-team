@@ -16,6 +16,22 @@ team sprint "antigravity: the landing page, dark, no framework" \
 
 Four agents, four worktrees, four patches — in the time the slowest one takes.
 
+## Vale a pena? Medido, não achismo
+
+Mesmas duas tarefas de dificuldade média, mesmo enunciado, duas arenas limpas —
+três agentes em paralelo contra um só:
+
+| | Três IAs em paralelo | Um agente sozinho |
+| --- | --- | --- |
+| Tempo de parede | **105 s** | **301 s** |
+| Custo em dólar (Anthropic) | **US$ 0,47** | **US$ 1,22** |
+| Outros consumos | 22.842 tokens do plano Codex; Groq de graça | — |
+| Testes próprios passando | 17 | 14 |
+
+**2,9× mais rápido e 2,6× mais barato**, com a parte mecânica indo para um
+modelo gratuito. O caminho até esses números, o que eles não dizem, e quando
+*não* vale dividir estão em [docs/EQUIPE-VS-SOLO.md](docs/EQUIPE-VS-SOLO.md).
+
 ## Install
 
 ```bash
