@@ -197,7 +197,8 @@ detect_quota() { # detect_quota <agent> <logfile> <exitcode>
     *"rate_limit_exceeded"*|*"try again in"*|*"rate limit"*|*"too many requests"*|*"retry-after"*)
       reason="rate limited"; secs=300 ;;
     *"insufficient_quota"*|*"insufficient quota"*|*"out of credit"*|*"credit balance"*|\
-    *"quota exceeded"*|*"usage limit"*|*"limit reached"*|*"weekly limit"*)
+    *"quota exceeded"*|*"quota reached"*|*"usage limit"*|*"limit reached"*|*"weekly limit"*|\
+    *"resets in"*|*"upgrade your subscription"*)
       reason="out of quota"; secs=21600 ;;
     *"[quota]"*|*"429"*)
       reason="rate limited"; secs=300 ;;
@@ -210,13 +211,16 @@ detect_quota() { # detect_quota <agent> <logfile> <exitcode>
 import re, sys
 text = open(sys.argv[1], errors="replace").read()[-4000:]
 best = 0
-for amount, unit in re.findall(r"try again in\s*([0-9]+(?:\.[0-9]+)?)\s*(ms|s|m|h)", text, re.I):
+for amount, unit in re.findall(r"(?:try again in|resets? in)\s*([0-9]+(?:\.[0-9]+)?)\s*(ms|s|m|h)", text, re.I):
     value = float(amount)
     unit = unit.lower()
     seconds = value / 1000 if unit == "ms" else value * 60 if unit == "m" else value * 3600 if unit == "h" else value
     best = max(best, seconds)
-for minutes, seconds in re.findall(r"try again in\s*([0-9]+)m([0-9.]+)s", text, re.I):
+for minutes, seconds in re.findall(r"(?:try again in|resets? in)\s*([0-9]+)m([0-9.]+)s", text, re.I):
     best = max(best, int(minutes) * 60 + float(seconds))
+# "Resets in 159h20m58s": o Antigravity conta em horas grudadas com minutos.
+for horas, minutos in re.findall(r"resets? in\s*([0-9]+)h([0-9]+)m", text, re.I):
+    best = max(best, int(horas) * 3600 + int(minutos) * 60)
 print(int(best))
 PY
 )"
