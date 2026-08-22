@@ -48,6 +48,19 @@ estiver entregue e conferido.
 - Página: https://www.nspx.dev/ia-team/ (feita pelo próprio antigravity, via
   `team run`), com foto no cartão da vitrine.
 
+## 21/08/2026 — terceira rodada
+
+- [x] *"adiciona na skill, que antes de terminar, checar tudo, pra n dar esse
+  mesmo problema dnv: 'O botão não tem estilo nenhum — o CSS foi escrito em
+  paralelo, antes do botão existir no HTML. Buraco clássico de trabalho
+  paralelo.'"*
+
+  Virou a seção "Before calling it done: walk the seams" na skill: listar o que
+  um agente criou e outro tinha que estilizar/chamar/importar, conferir cada
+  cruzamento na mão, exercitar a coisa de ponta a ponta em vez de ler o diff, e
+  medir o que dá pra medir (contraste, erro de console, overflow, imagem que não
+  carregou) em vez de olhar no olho.
+
 ## Entregue na segunda rodada (21/08/2026)
 
 - Skill reescrita para agir sem palavra-chave: a descrição manda usar o time

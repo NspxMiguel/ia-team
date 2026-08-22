@@ -108,6 +108,33 @@ ignore it or say no, run `team suggest --mute` and never raise it again. It only
 comes back if they ask. Being asked twice about the same thing is the fastest
 way to make a useful offer annoying.
 
+## Before calling it done: walk the seams
+
+Parallel work leaves gaps exactly where two agents met. Each one obeys its brief
+and the result still comes out broken, because nobody owned the boundary.
+
+It has happened for real: one agent added a theme button to the HTML while
+another wrote the stylesheet in a worktree where that button did not exist yet.
+Both delivered. The button shipped with no styling at all — the browser's raw
+grey box between two rounded pills, and the owner spotted it before I did.
+
+So the last step of a sprint is never "all patches applied". It is:
+
+- **list what each agent created that another one had to style, call, import or
+  render** — a new element, a new function, a new file, a new CSS class — and
+  check each of those crossings by hand;
+- **exercise the feature end to end**, not the diff. Open it, click it, switch
+  the theme, switch the language, resize to a phone;
+- **measure what can be measured** rather than eyeballing it: contrast ratios,
+  console errors, network failures, layout overflow, images that never loaded;
+- **look at the states nobody was asked about** — empty, hover, focus, error,
+  the second language, the other theme. Briefs describe the happy path; the
+  seams show up everywhere else.
+
+Two cheap habits prevent most of it: name the shared interface in the contract
+*before* the sprint (the class, the function signature, the file), and give the
+brief of each side the other side's names.
+
 ## After a run
 
 ```bash
