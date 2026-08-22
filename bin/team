@@ -640,7 +640,7 @@ cmd_sprint() {
 
   local i=0
   for id in "${ids[@]}"; do wait_run "$id"; i=$((i+1)); done
-  [ -n "$vigia_pid" ] && kill "$vigia_pid" 2>/dev/null || true
+  if [ -n "$vigia_pid" ]; then kill "$vigia_pid" 2>/dev/null || true; wait "$vigia_pid" 2>/dev/null || true; fi
   say ""
   say "${B}sprint done${RST}"
   local all_files=""
