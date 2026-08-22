@@ -56,6 +56,11 @@ fetch runner/cloud_agent.py "$TEAM_HOME/runner/cloud_agent.py"
 chmod +x "$TEAM_HOME/runner/cloud_agent.py"
 fetch port/TEAM.md "$TEAM_HOME/port/TEAM.md"
 
+say "-> the supervisor"
+mkdir -p "$TEAM_HOME/bin"
+fetch bin/team-watch "$TEAM_HOME/bin/team-watch"
+fetch lib/quota.py "$TEAM_HOME/lib/quota.py"
+
 say "-> the nudge that starts the sprint on its own"
 fetch bin/team-hint "$BIN_DIR/team-hint"
 chmod +x "$BIN_DIR/team-hint"

@@ -1,0 +1,312 @@
+#!/usr/bin/env python3
+"""Team supervisor — monitor running agents for quota issues and stalled processes."""
+
+import argparse
+import json
+import os
+import sys
+import time
+import subprocess
+from pathlib import Path
+from datetime import datetime
+
+
+def get_team_home():
+    """Get IA_TEAM_HOME from env or default."""
+    return os.getenv("IA_TEAM_HOME", os.path.expanduser("~/.ia-team"))
+
+
+def load_quota_module(team_home):
+    """Load the quota module, trying IA_TEAM_HOME/lib first, then repo lib."""
+    quota_paths = [
+        os.path.join(team_home, "lib"),
+        os.path.join(os.path.dirname(__file__), "..", "lib"),
+    ]
+
+    for path in quota_paths:
+        if os.path.exists(os.path.join(path, "quota.py")):
+            sys.path.insert(0, path)
+            try:
+                import quota
+                return quota
+            except ImportError:
+                sys.path.pop(0)
+
+    raise ImportError("Cannot find lib/quota.py in " + " or ".join(quota_paths))
+
+
+def check_process_alive(pid):
+    """Check if a process with given PID is still alive."""
+    try:
+        pid_int = int(pid)
+        os.kill(pid_int, 0)
+        return True
+    except (ValueError, ProcessLookupError, OSError):
+        return False
+
+
+def read_last_lines(filepath, lines=50):
+    """Read the last N lines of a file, safely."""
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            all_lines = f.readlines()
+            return "".join(all_lines[-lines:]) if all_lines else ""
+    except (FileNotFoundError, IOError):
+        return ""
+
+
+def compute_board_id(root_dir):
+    """Compute board filename from project root, matching bin/team logic."""
+    root = root_dir.rstrip("/")
+    name = os.path.basename(root).lower().replace(" ", "-")
+    name = "".join(c if c.isalnum() or c == "-" else "" for c in name)
+    name = name.strip("-")
+
+    try:
+        result = subprocess.run(
+            ["cksum"],
+            input=root.encode(),
+            capture_output=True,
+            text=False,
+            timeout=1
+        )
+        checksum = result.stdout.decode().split()[0]
+    except Exception:
+        checksum = str(hash(root) & 0xffffffff)
+
+    return f"{name}-{checksum}"
+
+
+def get_last_log_time(log_path):
+    """Get the mtime of the log file, or None if doesn't exist."""
+    try:
+        return os.path.getmtime(log_path)
+    except (FileNotFoundError, OSError):
+        return None
+
+
+def mark_quota(quota_file, agent, duration, reason):
+    """Mark an agent as out of quota for the given duration."""
+    os.makedirs(os.path.dirname(quota_file), exist_ok=True)
+    now = int(time.time())
+
+    data = {}
+    if os.path.exists(quota_file):
+        try:
+            with open(quota_file, "r") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    data[agent] = {
+        "until": now + duration,
+        "reason": reason[:200],
+        "since": now
+    }
+
+    with open(quota_file, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def cancel_run(run_dir, agent):
+    """Mark a run as failed and add a log entry."""
+    meta_path = os.path.join(run_dir, "meta.json")
+    log_path = os.path.join(run_dir, "log.txt")
+
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+            meta["status"] = "failed"
+            with open(meta_path, "w") as f:
+                json.dump(meta, f, indent=2)
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    try:
+        with open(log_path, "a") as f:
+            f.write(f"\n[{datetime.now().strftime('%H:%M:%S')}] Cancelled by team-watch: quota/rate limit detected\n")
+    except IOError:
+        pass
+
+
+def write_to_board(board_dir, board_id, agent, message):
+    """Write a message to the project's board."""
+    os.makedirs(board_dir, exist_ok=True)
+    board_path = os.path.join(board_dir, f"{board_id}.md")
+
+    timestamp = datetime.now().strftime("%d/%m %H:%M")
+    line = f"- [{timestamp}] **{agent}** (via team-watch): {message}\n"
+
+    with open(board_path, "a") as f:
+        f.write(line)
+
+
+def process_run(run_dir, quota_module, team_home, stale_minutes, quiet=False):
+    """Process a single running run. Return (status, message)."""
+    run_id = os.path.basename(run_dir)
+    meta_path = os.path.join(run_dir, "meta.json")
+
+    if not os.path.exists(meta_path):
+        return None, None
+
+    try:
+        with open(meta_path, "r") as f:
+            meta = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return None, None
+
+    if meta.get("status") != "running":
+        return None, None
+
+    agent = meta.get("agent", "unknown")
+    pid = meta.get("pid")
+    root_dir = meta.get("root") or meta.get("dir", "")
+
+    issues = []
+
+    if pid and not check_process_alive(pid):
+        issues.append(("process_dead", f"PID {pid} is not alive"))
+
+    log_path = os.path.join(run_dir, "log.txt")
+    report_path = os.path.join(run_dir, "report.md")
+
+    log_last_time = get_last_log_time(log_path)
+    now = time.time()
+    if log_last_time and (now - log_last_time) > stale_minutes * 60:
+        issues.append(("stale", f"No log writes for {stale_minutes}+ minutes"))
+
+    log_text = read_last_lines(log_path, 50)
+    report_text = read_last_lines(report_path, 50)
+    combined = log_text + "\n" + report_text
+
+    result = quota_module.analisar(combined)
+
+    if result.get("tipo") in ("rate", "quota"):
+        duration = result.get("espera", 300)
+        reason = result.get("fonte", "Unknown")
+        tipo = result.get("tipo")
+        provedor = result.get("provedor") or "unknown"
+
+        quota_file = os.path.join(team_home, "state", "quota.json")
+        mark_quota(quota_file, agent, duration, reason)
+        cancel_run(run_dir, agent)
+
+        if root_dir:
+            board_id = compute_board_id(root_dir)
+            board_dir = os.path.join(team_home, "boards")
+            msg = f"Benched for {duration}s ({tipo} limit from {provedor})"
+            write_to_board(board_dir, board_id, agent, msg)
+
+        issues.append(("quota" if tipo == "quota" else "rate", f"{tipo} limit: {reason}"))
+    elif result.get("tipo") == "auth":
+        source = result.get("fonte", "Unknown")
+        issues.append(("auth", f"Authentication error: {source}"))
+    elif result.get("tipo") == "erro":
+        source = result.get("fonte", "Unknown")
+        issues.append(("error", f"Error detected: {source}"))
+
+    # Um trabalho cujo processo morreu, ou cujo log parou de crescer, não está
+    # mais "running": deixar assim faz o standup mentir e prende a vaga do
+    # agente. Só a cota já derrubou o run acima, por isso o teste é por chave.
+    tipos = {tipo for tipo, _ in issues}
+    if tipos & {"process_dead", "stale"} and not (tipos & {"quota", "rate"}):
+        cancel_run(run_dir, agent)
+
+    if issues:
+        return agent, issues
+    return None, None
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Team supervisor — monitor running agents"
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=120,
+        help="Sleep interval in seconds (default: 120)"
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run once and exit"
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress summary output"
+    )
+    parser.add_argument(
+        "--stale",
+        type=int,
+        default=10,
+        help="Consider a run stale after this many minutes without log writes (default: 10)"
+    )
+
+    args = parser.parse_args()
+
+    team_home = get_team_home()
+    runs_dir = os.path.join(team_home, "runs")
+
+    try:
+        quota_module = load_quota_module(team_home)
+    except ImportError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not os.path.isdir(runs_dir):
+        if not args.quiet:
+            print(f"info: no runs directory at {runs_dir}")
+        sys.exit(0)
+
+    while True:
+        running_count = 0
+        signaled_count = 0
+        signaled_agents = []
+
+        try:
+            for entry in os.listdir(runs_dir):
+                run_path = os.path.join(runs_dir, entry)
+                if not os.path.isdir(run_path):
+                    continue
+
+                agent, issues = process_run(
+                    run_path,
+                    quota_module,
+                    team_home,
+                    args.stale,
+                    quiet=args.quiet
+                )
+
+                if issues is None:
+                    continue
+
+                running_count += 1
+                if agent and issues:
+                    signaled_count += 1
+                    signaled_agents.append((agent, issues))
+
+        except Exception as e:
+            if not args.quiet:
+                print(f"error: {e}", file=sys.stderr)
+
+        if not args.quiet:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] "
+                  f"{running_count} running, {signaled_count} signaled")
+            for agent, issues in signaled_agents:
+                for issue_type, issue_msg in issues:
+                    print(f"  {agent}: {issue_type} — {issue_msg}")
+
+        if args.once:
+            break
+
+        try:
+            time.sleep(args.interval)
+        except KeyboardInterrupt:
+            break
+
+
+if __name__ == "__main__":
+    main()

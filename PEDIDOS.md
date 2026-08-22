@@ -61,6 +61,12 @@ estiver entregue e conferido.
   medir o que dá pra medir (contraste, erro de console, overflow, imagem que não
   carregou) em vez de olhar no olho.
 
+- [x] *"tem q ter algum sistema de revisao, pra n dar isso q nem o antigravity,
+  planos esgotam toda hora, tem q a cada tantos min, o claude revisar e checar as
+  logs, pra ver se ele ta fazendo tudo certinho, e se nao acabou quota"*
+- [x] *"ao perceber erro com a ia, ja sinalizar e dar timeout pelo tempo q aparece
+  na ia, a maioria coloca quando reseta. pesquisa na net oq cada ia fala"*
+
 ## Entregue na segunda rodada (21/08/2026)
 
 - Skill reescrita para agir sem palavra-chave: a descrição manda usar o time

@@ -618,6 +618,17 @@ cmd_sprint() {
   done
   say ""
   say "${B}sprint started${RST} — ${#ids[@]} tasks in parallel"
+  # Um supervisor por sprint: ninguém precisa lembrar de vigiar cota no meio do
+  # trabalho. Ele sai junto com a rodada.
+  local vigia=""
+  for c in "$TEAM_HOME/bin/team-watch" "$REPO_ROOT/bin/team-watch"; do
+    [ -f "$c" ] && { vigia="$c"; break; }
+  done
+  local vigia_pid=""
+  if [ -n "$vigia" ] && [ "$BG" -eq 0 ]; then
+    ( python3 "$vigia" --interval 60 --quiet >/dev/null 2>&1 ) &
+    vigia_pid=$!
+  fi
   [ "$BG" -eq 1 ] && { printf '%s\n' "${ids[@]}"; return 0; }
 
   # Quem não recebeu tarefa não fica olhando: assim que um patch sai, um agente
@@ -629,6 +640,7 @@ cmd_sprint() {
 
   local i=0
   for id in "${ids[@]}"; do wait_run "$id"; i=$((i+1)); done
+  [ -n "$vigia_pid" ] && kill "$vigia_pid" 2>/dev/null || true
   say ""
   say "${B}sprint done${RST}"
   local all_files=""
@@ -874,6 +886,18 @@ cmd_port() {
   say "Antigravity picks up AGENTS.md in the project it opens."
 }
 
+# team watch — o supervisor. Deixa rodando enquanto o time trabalha: ele lê os
+# logs, reconhece o jeito de cada fornecedor anunciar limite, põe quem estourou
+# de molho pelo tempo que o próprio anunciou e avisa no quadro.
+cmd_watch() {
+  local supervisor=""
+  for c in "$TEAM_HOME/bin/team-watch" "$REPO_ROOT/bin/team-watch" "$(dirname "$SELF")/team-watch"; do
+    [ -f "$c" ] && { supervisor="$c"; break; }
+  done
+  [ -n "$supervisor" ] || die "bin/team-watch não está instalado — rode ./install.sh"
+  exec python3 "$supervisor" "$@"
+}
+
 usage() {
   cat <<'USAGE'
 team — run the other AIs as a team, in parallel, and review what they bring back
@@ -882,6 +906,7 @@ team — run the other AIs as a team, in parallel, and review what they bring ba
   team agents                      the roster and what each one is good at
   team hire [name]                 how to add someone who is not set up yet
   team quota [--clear [agent]]     who is out of quota, and until when
+  team watch [--interval s]        supervise running agents: quota, stalls, errors
 
   team run <agent> "task"          one task, isolated git worktree, patch out
   team sprint "t1" "codex: t2" ... several tasks at once, one agent each
@@ -927,6 +952,7 @@ main() {
     drop)        [ $# -ge 1 ] || die "usage: team drop <id>"; cmd_drop "$@" ;;
     wait)        [ $# -ge 1 ] || die "usage: team wait <id>"; wait_run "$1"; cmd_show "$1" ;;
     suggest)     cmd_suggest "$@" ;;
+    watch)       cmd_watch "$@" ;;
     port)        cmd_port "$@" ;;
     version|-V|--version) say "team $VERSION" ;;
     help|-h|--help) usage ;;

@@ -123,6 +123,26 @@ Two habits worth keeping:
 Agents also raise things on their own: anything they report starting with `TIP:`
 lands on the board for the others.
 
+## Watch them while they work
+
+Plans run out mid-sprint, and an agent that hit a wall keeps a run "running"
+until the timeout — half an hour of nothing, if you let it.
+
+```bash
+team watch                 # supervisiona: cota, travamento, erro
+team watch --once          # uma passada agora
+```
+
+A sprint starts one on its own. It reads each running agent's log, recognises
+how every provider announces a limit — the wording and the clock format differ
+per vendor — benches whoever hit one **for exactly the time that vendor
+announced**, cancels the dead run and leaves a note on the board.
+
+What it catches: quota and rate limits, a run whose log stopped growing, and a
+worker process that died without updating its own state. What it does not do is
+decide for me: when it benches someone, the task still has to be handed to
+another agent, and that is my call.
+
 ## When someone runs out of quota
 
 Free tiers end. `team` notices — rate limits, exhausted credits, plan caps — and
