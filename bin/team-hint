@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Gancho de UserPromptSubmit: lembra o time quando o pedido comporta divisão.
+
+O Claude Code chama isto com o prompt do usuário em JSON no stdin. Se o pedido
+parecer um trabalho de várias partes, imprimimos uma nota curta que entra no
+contexto da conversa — para a divisão não depender de o modelo lembrar sozinho.
+
+Silêncio é o padrão: pedido curto, pergunta, conversa e conserto pontual não
+imprimem nada.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+CONSTRUIR = re.compile(
+    r"\b(faz|faça|fazer|cria|criar|monta|montar|implementa|implementar|constr[oóu]|"
+    r"desenvolve|desenvolver|refaz|refazer|reescreve|reescrever|migra|migrar|"
+    r"adiciona|adicionar|coloca|colocar|arruma|arrumar|revisa|revisar|organiza|"
+    r"build|create|implement|refactor|rewrite|migrate|add)\b", re.I)
+
+PARTES = re.compile(
+    r"\b(site|app|aplicativo|sistema|api|backend|front|frontend|tela|telas|p[áa]gina|"
+    r"p[áa]ginas|interface|banco|schema|testes?|documenta[çc][ãa]o|docs|readme|css|"
+    r"design|layout|servidor|cli|instalador|deploy|landing)\b", re.I)
+
+INTEIRO = re.compile(
+    r"\b(tudo|inteiro|inteira|completo|completa|todos|todas|do zero|full|whole|"
+    r"end to end|de ponta a ponta)\b", re.I)
+
+
+def agentes_prontos():
+    """Quem está de fato disponível agora, na voz do próprio `team`."""
+    comando = os.environ.get("TEAM_BIN") or "team"
+    try:
+        saida = subprocess.run([comando, "doctor"], capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [l.split()[1] for l in saida.splitlines() if l.strip().startswith("✓") and len(l.split()) > 1]
+
+
+def vale_dividir(texto):
+    """Pontuação simples: construir + partes distintas, ou um pedido abrangente."""
+    if len(texto) < 25:
+        return False
+    partes = len(set(m.group(0).lower() for m in PARTES.finditer(texto)))
+    pontos = 0
+    if CONSTRUIR.search(texto):
+        pontos += 1
+    if partes >= 2:
+        pontos += 2
+    elif partes == 1:
+        pontos += 1
+    if INTEIRO.search(texto):
+        pontos += 1
+    if len(texto) > 240:
+        pontos += 1
+    return pontos >= 3
+
+
+def main():
+    try:
+        entrada = json.load(sys.stdin)
+    except (ValueError, OSError):
+        return 0
+    texto = (entrada.get("prompt") or "").strip()
+    if not texto or not vale_dividir(texto):
+        return 0
+    prontos = agentes_prontos()
+    if len(prontos) < 2:
+        return 0
+    print(
+        "[ia-team] Este pedido tem partes que provavelmente não se tocam, e "
+        + str(len(prontos)) + " agentes estão livres agora: " + ", ".join(prontos) + ". "
+        "Antes de escrever qualquer código: escreva o contrato (interfaces, nomes de "
+        "arquivo, quem faz o quê), registre com `team note`, e dispare `team sprint` "
+        "com uma tarefa por agente em arquivos que não colidem. Fazer tudo sozinho "
+        "aqui é a exceção — se for esse o caso, diga em uma linha por quê. No fim, "
+        "confira as costuras entre o que cada um entregou."
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

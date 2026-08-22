@@ -19,10 +19,29 @@ team doctor     # who is available, signed in, and has quota left
 team agents     # the roster and what each one is good at
 ```
 
-## Start delegating before being asked
+## Splitting is the default, not the reward
 
-Nobody has to say the word. The moment a job has parts that do not touch the
-same files, it is a sprint:
+Nobody has to say the word — and waiting to be told is the failure mode this
+skill exists to prevent. The owner has hit it: he handed over a project and
+watched it get built serially, one file after another, while five agents sat
+idle.
+
+So the rule is inverted. **When a job has two or more parts that do not touch
+the same files, split it.** Doing it alone is the exception, and an exception
+needs a reason said out loud in one line — "this is a single function, splitting
+costs more than it saves", "everything lives in one file", "nobody else is
+available".
+
+Before writing any code on a job like that, in this order:
+
+1. **Write the contract.** Interfaces, file names, URL prefixes, function
+   signatures, who owns what. This is the step that decides whether the pieces
+   fit at the end.
+2. **`team note`** it, so every brief carries it.
+3. **`team sprint`**, one task per agent, on files that cannot collide.
+4. Say it in one line to the person waiting: "I put four of them on this".
+
+The moment a job has parts that do not touch the same files, it is a sprint:
 
 ```bash
 team sprint "antigravity: the landing page, dark, no framework" \

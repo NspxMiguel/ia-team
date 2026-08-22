@@ -56,6 +56,30 @@ fetch runner/cloud_agent.py "$TEAM_HOME/runner/cloud_agent.py"
 chmod +x "$TEAM_HOME/runner/cloud_agent.py"
 fetch port/TEAM.md "$TEAM_HOME/port/TEAM.md"
 
+say "-> the nudge that starts the sprint on its own"
+fetch bin/team-hint "$BIN_DIR/team-hint"
+chmod +x "$BIN_DIR/team-hint"
+python3 - "$CLAUDE_DIR/settings.json" "$BIN_DIR/team-hint" <<'PY'
+import json, os, shutil, sys
+caminho, gancho = sys.argv[1], sys.argv[2]
+dados = {}
+if os.path.exists(caminho):
+    shutil.copyfile(caminho, caminho + ".bak-ia-team")
+    try:
+        dados = json.load(open(caminho))
+    except ValueError:
+        dados = {}
+ganchos = dados.setdefault("hooks", {}).setdefault("UserPromptSubmit", [])
+# Um gancho só, mesmo reinstalando: procuramos pelo nosso comando antes de somar.
+já = any(gancho in json.dumps(entrada) for entrada in ganchos)
+if not já:
+    ganchos.append({"hooks": [{"type": "command", "command": gancho}]})
+    json.dump(dados, open(caminho, "w"), indent=2)
+    print("   gancho registrado em " + caminho)
+else:
+    print("   gancho já estava registrado")
+PY
+
 say "-> skill in $SKILL_DIR"
 backup "$SKILL_DIR/SKILL.md"
 fetch skill/SKILL.md "$SKILL_DIR/SKILL.md"
