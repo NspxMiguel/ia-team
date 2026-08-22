@@ -593,6 +593,10 @@ cmd_sprint() {
   [ ${#REST[@]} -gt 0 ] || die "usage: team sprint \"task one\" \"agent: task two\" ..."
   local free; free="$(ready_agents | tr '\n' ' ')"
   [ -n "$free" ] || die "nobody available. run: team doctor"
+  # Fila maior que a equipe é exatamente quando vale oferecer reforço — e o
+  # cmd_suggest já se cala sozinho se a pessoa mandou calar.
+  local livres; livres="$(printf '%s\n' $free | wc -l | tr -d ' ')"
+  if [ ${#REST[@]} -gt "$livres" ]; then cmd_suggest || true; fi
 
   local ids=() names=() used="" task agent id
   for task in "${REST[@]}"; do
@@ -616,6 +620,13 @@ cmd_sprint() {
   say "${B}sprint started${RST} — ${#ids[@]} tasks in parallel"
   [ "$BG" -eq 1 ] && { printf '%s\n' "${ids[@]}"; return 0; }
 
+  # Quem não recebeu tarefa não fica olhando: assim que um patch sai, um agente
+  # livre revisa. Sobrar gente parada num sprint é trabalho mal dividido.
+  local ociosos=() a
+  for a in $(ready_agents); do
+    case " $used " in *" $a "*) ;; *) ociosos+=("$a") ;; esac
+  done
+
   local i=0
   for id in "${ids[@]}"; do wait_run "$id"; i=$((i+1)); done
   say ""
@@ -633,6 +644,12 @@ cmd_sprint() {
       *)    printf '  %s✗%s %-12s %s   %steam show %s%s\n' "$RED" "$RST" "$agent2" "$status" "$DIM" "$id" "$RST" ;;
     esac
   done
+  if [ ${#ociosos[@]} -gt 0 ] && [ ${#ids[@]} -gt 0 ]; then
+    say ""
+    say "${DIM}${#ociosos[@]} agente(s) sem tarefa nesta rodada: ${ociosos[*]}${RST}"
+    say "${DIM}revisão cruzada: team crosscheck <id> --by <agente>${RST}"
+  fi
+
   local clashes; clashes="$(printf '%s' "$all_files" | grep -v '^$' | sort | uniq -d || true)"
   if [ -n "$clashes" ]; then
     say ""

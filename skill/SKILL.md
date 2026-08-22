@@ -61,6 +61,31 @@ When it is one indivisible task, `team run <agent> "task"` — one agent, one
 patch. When it is a judgment call, `team panel "question"` — everyone answers,
 and the disagreement is the useful part.
 
+## Use everybody, not the same three
+
+`team doctor` usually lists more agents than anyone remembers to use. Falling
+back to the same two or three is the second failure mode of this skill — the
+owner caught it: seven were available and three were working.
+
+**An idle agent in a sprint means the work was split badly.** When someone is
+left out, one of these is true and each has an answer:
+
+- the job has more parts than I named — split finer (the tests are their own
+  task; so are the docs; so is the migration script);
+- the parts really are few — put the leftovers to work *checking*:
+  `team crosscheck` on each patch as it lands, a `team panel` on the design
+  decision, a second implementation of the risky piece to compare against;
+- they are slow or expensive for this — then say so in the run, do not just
+  forget them.
+
+And when the queue is longer than the roster, that is the moment to offer
+reinforcements rather than to queue: `team suggest` prints the free options
+first. `team hire <name>` says exactly how to add one. A sprint already offers
+this on its own when there are more tasks than agents.
+
+`team sprint` reports who was left with nothing to do. Treat that line as a
+defect in the plan, not as spare capacity.
+
 ## Who is good at what
 
 | Work | Who | Why |
