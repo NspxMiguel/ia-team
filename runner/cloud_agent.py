@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -24,16 +25,169 @@ QUOTA_MARKS = (
     "rate limit", "rate_limit", "quota", "insufficient_quota", "billing",
     "credits", "too many requests", "usage limit", "out of tokens",
 )
-DANGEROUS = re.compile(
-    r"\b(sudo|rm\s+-rf\s+/|mkfs|shutdown|reboot|:\(\)\{|git\s+push|git\s+reset\s+--hard"
-    r"|curl[^|]*\|\s*(ba)?sh|wget[^|]*\|\s*(ba)?sh)\b"
+# This denylist is defence in depth, not a complete shell sandbox or the only
+# security boundary. The agent must still run under filesystem/process isolation;
+# parsing here makes the common destructive cases explicit and hard to disguise.
+SHELL_PROGRAMS = {"bash", "dash", "ksh", "sh", "zsh"}
+CONTROL_OPERATORS = {"&", "&&", "(", ")", ";", ";;", "|", "|&", "||"}
+REDIRECTION_OPERATORS = {"<", "<&", "<>", ">", ">&", ">>", ">|", "&>", "&>>"}
+HEREDOC_OPERATORS = {"<<", "<<-"}
+SHELL_PARAMETER = re.compile(
+    r"\$(?:\{[^{}]*\}|[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!_-])"
 )
+SHELL_PARAMETER_REFERENCE = re.compile(
+    r"\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)"
+    r"(?:(?P<operator>:-|:\+|-|\+)(?P<alternative>[^{}]*))?\}"
+    r"|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))"
+)
+SHELL_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "dist", "build", ".next"}
 MAX_READ = 60_000
 
 
 def log(msg):
     print(msg, file=sys.stderr, flush=True)
+
+
+def expand_parameters(word, variables):
+    """Expand variables whose value is known without executing the shell."""
+    def replace(match):
+        name = match.group("braced") or match.group("plain")
+        operator = match.group("operator")
+        known = name in variables
+        value = variables.get(name, "")
+        alternative = match.group("alternative") or ""
+        if operator in ("-", ":-"):
+            use_alternative = not known or (operator == ":-" and not value)
+            return alternative if use_alternative else value
+        if operator in ("+", ":+"):
+            use_alternative = known and (operator == "+" or bool(value))
+            return alternative if use_alternative else ""
+        return value if known else match.group(0)
+
+    return SHELL_PARAMETER_REFERENCE.sub(replace, word)
+
+
+def normalize_shell_tokens(tokens):
+    """Expand environment and simple same-line assignments in shell words."""
+    variables = dict(os.environ)
+    # A few passes also handle constant assignments which refer to one another.
+    for unused in range(4):
+        changed = False
+        for token in tokens:
+            match = SHELL_ASSIGNMENT.match(token)
+            if not match or "$(" in match.group(2) or "`" in match.group(2):
+                continue
+            value = expand_parameters(match.group(2), variables)
+            if variables.get(match.group(1)) != value:
+                variables[match.group(1)] = value
+                changed = True
+        if not changed:
+            break
+    return [expand_parameters(token, variables) for token in tokens]
+
+
+def shell_tokens(command):
+    """Tokenize and normalize shell syntax before the safety checks."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    return normalize_shell_tokens(list(lexer))
+
+
+def word_forms(word):
+    """Return useful normalized forms of a possibly expanded shell word."""
+    expanded = os.path.expandvars(word)
+    without_parameters = SHELL_PARAMETER.sub("", word)
+    forms = {word.lower(), expanded.lower(), without_parameters.lower()}
+    return forms | {os.path.basename(value) for value in forms}
+
+
+def is_program(word, name):
+    return name in word_forms(word)
+
+
+def is_mkfs(word):
+    return any(value == "mkfs" or value.startswith("mkfs.")
+               for value in word_forms(word))
+
+
+def following_words(tokens, start):
+    """Words belonging to the same simple command as tokens[start]."""
+    out = []
+    for token in tokens[start + 1:]:
+        if token in CONTROL_OPERATORS:
+            break
+        out.append(token)
+    return out
+
+
+def rm_is_recursive_force(arguments):
+    recursive = False
+    force = False
+    for argument in arguments:
+        forms = word_forms(argument)
+        if ("$" in argument or "`" in argument) and argument.startswith("-"):
+            # A dynamic option can expand to -rf even when neither letter is
+            # visible in the source command.
+            return True
+        for value in forms:
+            if value == "--recursive":
+                recursive = True
+            elif value == "--force":
+                force = True
+            elif value.startswith("-") and not value.startswith("--"):
+                flags = value[1:]
+                recursive = recursive or "r" in flags
+                force = force or "f" in flags
+    return recursive and force
+
+
+def dd_uses_device(arguments, root):
+    for argument in arguments:
+        forms = word_forms(argument)
+        operands = [value for value in forms
+                    if value.startswith("if=") or value.startswith("of=")]
+        if operands and ("$" in argument or "`" in argument):
+            # The value is not knowable until the shell expands it; it could be
+            # a block device even when /dev is absent from the command text.
+            return True
+        for operand in operands:
+            path = operand.split("=", 1)[1]
+            if not path:
+                continue
+            path = os.path.expanduser(path)
+            if not os.path.isabs(path):
+                path = os.path.join(root, path)
+            path = os.path.realpath(path)
+            if path == "/dev" or path.startswith("/dev" + os.sep):
+                return True
+    return False
+
+
+def pipeline_groups(tokens):
+    """Return pipelines as lists of their simple-command token lists."""
+    groups = []
+    pipeline = []
+    command = []
+    for token in tokens:
+        if token in ("|", "|&"):
+            pipeline.append(command)
+            command = []
+        elif token in CONTROL_OPERATORS:
+            if command:
+                pipeline.append(command)
+            if len(pipeline) > 1:
+                groups.append(pipeline)
+            pipeline = []
+            command = []
+        else:
+            command.append(token)
+    if command:
+        pipeline.append(command)
+    if len(pipeline) > 1:
+        groups.append(pipeline)
+    return groups
 
 
 class Workspace:
@@ -100,9 +254,72 @@ class Workspace:
             fh.write(data.replace(find, replace))
         return "edited %s" % path
 
+    def command_refusal(self, command):
+        """Return why a normalized shell command is unsafe, or None."""
+        try:
+            tokens = shell_tokens(command)
+        except ValueError as exc:
+            return "invalid shell syntax: %s" % exc
+
+        for index, token in enumerate(tokens):
+            if any(is_program(token, name) for name in
+                   ("reboot", "shutdown", "sudo")):
+                return "%s is not allowed" % token
+            if is_mkfs(token):
+                return "filesystem formatting is not allowed"
+            if is_program(token, "rm") and rm_is_recursive_force(
+                    following_words(tokens, index)):
+                return "recursive forced removal is not allowed"
+            if is_program(token, "dd") and dd_uses_device(
+                    following_words(tokens, index), self.root):
+                return "dd may not read from or write to a device"
+            if is_program(token, "git"):
+                arguments = following_words(tokens, index)
+                if any(is_program(value, "push") for value in arguments):
+                    return "git push is not allowed"
+                if (any(is_program(value, "reset") for value in arguments)
+                        and any("--hard" in word_forms(value)
+                                for value in arguments)):
+                    return "git reset --hard is not allowed"
+
+        compact = "".join(tokens).replace(" ", "")
+        if ":(){:|:&};" in compact:
+            return "shell fork bombs are not allowed"
+
+        for pipeline in pipeline_groups(tokens):
+            # Refusing every pipe into a shell also covers encoded payloads
+            # (for example, base64 -d | sh), not just a literal curl | sh.
+            for command in pipeline[1:]:
+                if any(any(is_program(token, shell) for shell in SHELL_PROGRAMS)
+                       for token in command):
+                    return "piping commands into a shell is not allowed"
+
+        for index, operator in enumerate(tokens):
+            if operator in HEREDOC_OPERATORS:
+                continue
+            if operator not in REDIRECTION_OPERATORS:
+                continue
+            if index + 1 >= len(tokens):
+                return "redirection has no target"
+            target = tokens[index + 1]
+            if target in CONTROL_OPERATORS or target in REDIRECTION_OPERATORS:
+                return "redirection has no file target"
+            if operator in ("<&", ">&") and (target.isdigit() or target == "-"):
+                continue
+            if "$" in target or "`" in target or any(c in target for c in "*?["):
+                return "dynamic redirection targets are not allowed"
+            try:
+                self.resolve(os.path.expanduser(target))
+            except ValueError:
+                return "redirection outside the working directory is not allowed"
+        return None
+
     def run_command(self, command, timeout=120):
-        if DANGEROUS.search(command):
-            return "ERROR: refused — that command is not allowed here"
+        if not isinstance(command, str):
+            return "ERROR: refused — command must be text"
+        refusal = self.command_refusal(command)
+        if refusal:
+            return "ERROR: refused — %s" % refusal
         try:
             proc = subprocess.run(
                 ["/bin/sh", "-c", command], cwd=self.root, timeout=timeout,
@@ -339,7 +556,9 @@ def main():
              "write_file": lambda a: ws.write_file(a["path"], a.get("content", "")),
              "append_file": lambda a: ws.append_file(a["path"], a.get("content", "")),
              "edit_file": lambda a: ws.edit_file(a["path"], a["find"], a.get("replace", "")),
-             "run_command": lambda a: ws.run_command(a["command"])}
+             "run_command": lambda a: ws.run_command(
+                 a["command"], timeout=max(
+                     1, min(120, int(deadline - time.time()))))}
 
     for step in range(args.max_steps):
         if time.time() > deadline:
@@ -387,9 +606,30 @@ def main():
         if data is None:
             return 2
 
-        choice = data.get("choices", [{}])[0]
-        msg = choice.get("message", {}) or {}
-        tool_calls = msg.get("tool_calls") or []
+        if not isinstance(data, dict) or not isinstance(data.get("choices"), list) \
+                or not data["choices"]:
+            log("[team] invalid API response: no choices")
+            return 2
+        choice = data["choices"][0]
+        if not isinstance(choice, dict) or not isinstance(
+                choice.get("message"), dict) or not choice["message"]:
+            log("[team] invalid API response: choice has no message")
+            return 2
+        msg = choice["message"]
+        raw_tool_calls = msg.get("tool_calls") or []
+        if not isinstance(raw_tool_calls, list):
+            log("[team] invalid API response: tool_calls is not a list")
+            return 2
+        tool_calls = []
+        for call_index, raw_call in enumerate(raw_tool_calls):
+            if not isinstance(raw_call, dict):
+                log("[team] invalid API response: malformed tool call")
+                return 2
+            tool_call = dict(raw_call)
+            call_id = tool_call.get("id")
+            if not isinstance(call_id, str) or not call_id.strip():
+                tool_call["id"] = "call_%d_%d" % (step + 1, call_index + 1)
+            tool_calls.append(tool_call)
         messages.append({"role": "assistant",
                          "content": msg.get("content") or "",
                          "tool_calls": tool_calls})
@@ -420,7 +660,7 @@ def main():
             seen_calls[signature] = seen_calls.get(signature, 0) + 1
             log("  · %s %s" % (name, json.dumps(fargs)[:120]))
             if seen_calls[signature] >= 3:
-                messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+                messages.append({"role": "tool", "tool_call_id": tc["id"],
                                  "name": name, "content":
                                  "You already ran this exact call twice and the "
                                  "answer has not changed. Stop looking and do the "
@@ -434,7 +674,7 @@ def main():
                 result = "ERROR: %s" % exc
             if name in ("write_file", "append_file", "edit_file"):
                 wrote_something = True
-            messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
+            messages.append({"role": "tool", "tool_call_id": tc["id"],
                              "name": name, "content": str(result)[:args.max_tool_output]})
 
         # Exploring is fine; exploring forever is not.
