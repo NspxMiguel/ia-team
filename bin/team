@@ -159,22 +159,34 @@ quota_mark() { # quota_mark <agent> <seconds> <reason>
   # estado de verdade vire depósito de nomes que nunca existiram.
   adapter_file "$1" >/dev/null 2>&1 || return 0
   mkdir -p "$STATE_DIR"
-  # aproveita e varre o que já venceu
+  # Num sprint, vários agentes estouram limite quase juntos — o provedor divide
+  # o mesmo teto por minuto. Sem trava, o ler-modificar-gravar de um apaga a
+  # marcação do outro e o time volta a mandar trabalho para quem está de molho.
   python3 - "$QUOTA_FILE" "$1" "$2" "$3" <<'PY'
-import json, os, sys, time
-path, agent, secs, reason = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
-data = {}
-if os.path.exists(path):
-    try:
-        data = json.load(open(path))
-    except ValueError:
-        pass
-agora = int(time.time())
-data = {a: v for a, v in data.items() if v.get("until", 0) > agora}
-data[agent] = {"until": agora + secs, "reason": reason[:200], "since": agora}
-json.dump(data, open(path, "w"), indent=2)
+import fcntl, json, os, sys, time
+caminho, agente, segundos, motivo = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+trava = caminho + ".lock"
+with open(trava, "a+") as t:
+    fcntl.flock(t, fcntl.LOCK_EX)
+    dados = {}
+    if os.path.exists(caminho):
+        try:
+            with open(caminho) as fh:
+                dados = json.load(fh)
+        except ValueError:
+            dados = {}
+    agora = int(time.time())
+    dados = {a: v for a, v in dados.items() if v.get("until", 0) > agora}
+    dados[agente] = {"until": agora + segundos, "reason": motivo[:200], "since": agora}
+    # grava ao lado e troca de nome: quem estiver lendo pega o arquivo inteiro,
+    # velho ou novo, nunca um pela metade.
+    temporario = caminho + ".tmp"
+    with open(temporario, "w") as fh:
+        json.dump(dados, fh, indent=2)
+    os.replace(temporario, caminho)
 PY
 }
+
 quota_clear() {
   [ -s "$QUOTA_FILE" ] || return 0
   python3 - "$QUOTA_FILE" "$1" <<'PY'
@@ -444,15 +456,23 @@ cmd_quota() {
   return 0
 }
 
+# Flag de valor sem valor é erro de quem digitou, não motivo para o shell
+# despejar "unbound variable" — e um valor que é outra flag engoliria a próxima.
+exige_valor() {
+  [ $# -ge 2 ] || die "$1 precisa de um valor"
+  case "$2" in -*) die "$1 precisa de um valor (veio \"$2\")" ;; esac
+}
+
 parse_common() {
   DIR="$PWD"; MODEL=""; TIMEOUT=900; BG=0; PLACE="worktree"; BY=""; ATTACH=(); REST=()
   while [ $# -gt 0 ]; do
     case "$1" in
-      --dir)      DIR="$2"; shift 2 ;;
-      --model|-m) MODEL="$2"; shift 2 ;;
-      --timeout)  TIMEOUT="$2"; shift 2 ;;
-      --file|-f)  ATTACH+=("$2"); shift 2 ;;
-      --by)       BY="$2"; shift 2 ;;
+      --dir)      exige_valor "$@"; DIR="$2"; shift 2 ;;
+      --model|-m) exige_valor "$@"; MODEL="$2"; shift 2 ;;
+      --timeout)  exige_valor "$@"; TIMEOUT="$2"; shift 2
+                  case "$TIMEOUT" in *[!0-9]*|"") die "--timeout precisa de um número de segundos" ;; esac ;;
+      --file|-f)  exige_valor "$@"; ATTACH+=("$2"); shift 2 ;;
+      --by)       exige_valor "$@"; BY="$2"; shift 2 ;;
       --here)     PLACE="here"; shift ;;
       --worktree) PLACE="worktree"; shift ;;
       --bg)       BG=1; shift ;;
@@ -534,8 +554,15 @@ start_run() {
     branch="team/$agent/${id##*-}"
     work="$WT_DIR/$id"; mkdir -p "$WT_DIR"
     git -C "$root" worktree add -q -b "$branch" "$work" HEAD || die "could not create a worktree for $agent"
+    # `git diff HEAD` só enxerga o que o git já conhece: um arquivo novo que a
+    # pessoa acabou de criar ficaria de fora, e o agente trabalharia sobre uma
+    # árvore que não é a que ela está vendo. O `add -N` registra a intenção de
+    # adicionar — o conteúdo entra no diff sem nada ser realmente commitado.
+    git -C "$root" add -N -A >/dev/null 2>&1 || true
     if ! git -C "$root" diff --quiet HEAD 2>/dev/null; then
-      git -C "$root" diff HEAD | git -C "$work" apply --allow-empty - 2>/dev/null || true
+      if ! git -C "$root" diff --binary HEAD | git -C "$work" apply --allow-empty - 2>/dev/null; then
+        warn "não consegui levar suas mudanças locais para a worktree de $agent — ele vai trabalhar sobre o último commit"
+      fi
     fi
     # Freeze that starting point as a commit of its own. Everything the agent
     # does is then the diff against it — the uncommitted work we carried over
@@ -724,7 +751,7 @@ cmd_board() {
 cmd_note() { # team note <author> "text"
   local author="$1"; shift
   parse_common "$@"
-  board_add "$DIR" "$author" "${REST[*]}"
+  board_add "$DIR" "$author" "${REST[*]:-}"
   say "noted on the board"
 }
 
@@ -732,7 +759,7 @@ cmd_relay() { # team relay <from> <to> "text"
   local from="$1" to="$2"; shift 2
   parse_common "$@"
   adapter_file "$to" >/dev/null || die "no agent named $to"
-  board_add "$DIR" "$from" "${REST[*]}" "$to"
+  board_add "$DIR" "$from" "${REST[*]:-}" "$to"
   say "message left for $to — it goes into their next brief"
 }
 
@@ -829,6 +856,12 @@ cmd_apply() {
 cmd_drop() {
   local id="$1" d="$RUNS_DIR/$1"
   [ -d "$d" ] || die "unknown run: $id"
+  # Apagar a worktree de um agente que ainda está escrevendo nela perde o
+  # trabalho e deixa o processo gravando num diretório que não existe mais.
+  refresh_status "$id"
+  if [ "$(json_get "$d/meta.json" status)" = "running" ]; then
+    die "$id ainda está rodando — espere (team wait $id) ou pare antes de descartar"
+  fi
   local root work branch
   root="$(json_get "$d/meta.json" root)"; work="$(json_get "$d/meta.json" work)"; branch="$(json_get "$d/meta.json" branch)"
   if [ -n "$root" ] && [ -n "$branch" ] && [ -d "$work" ]; then

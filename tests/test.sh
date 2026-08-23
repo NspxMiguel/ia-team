@@ -119,6 +119,25 @@ check "the carried work is not re-sent" "! grep -q '^+dirty' '$IA_TEAM_HOME/runs
 "$TEAM_ISOLATED" drop "$ID3" >/dev/null 2>&1
 git -C "$REPO" checkout -- a.txt 2>/dev/null
 
+printf '%s\n' "— repositório sujo, com arquivo novo"
+printf 'mexido\n' >> "$REPO/a.txt"
+printf 'recem criado\n' > "$REPO/novo.txt"
+"$TEAM_ISOLATED" run fake --dir "$REPO" "olhe o que tem aqui" >/dev/null 2>&1
+IDS="$(ls -1t "$IA_TEAM_HOME/runs" | head -1)"
+check "arquivo novo chega na worktree"   "[ -f '$IA_TEAM_HOME/worktrees/$IDS/novo.txt' ]"
+check "alteração local chega na worktree" "grep -q mexido '$IA_TEAM_HOME/worktrees/$IDS/a.txt'"
+check "o patch não devolve o que era do dev" "! grep -q '^+recem criado' '$IA_TEAM_HOME/runs/$IDS/patch.diff'"
+"$TEAM_ISOLATED" drop "$IDS" >/dev/null 2>&1
+rm -f "$REPO/novo.txt"; git -C "$REPO" checkout -- a.txt 2>/dev/null; git -C "$REPO" rm --cached -q novo.txt 2>/dev/null || true
+
+printf '%s\n' "— flags mal digitadas não derrubam o shell"
+OUT="$("$TEAM_ISOLATED" ask fake --dir "$REPO" "pergunta" --model 2>&1 || true)"
+case "$OUT" in *"precisa de um valor"*) ok "flag sem valor dá erro legível";; *) bad "flag sem valor dá erro legível" "$OUT";; esac
+OUT="$("$TEAM_ISOLATED" run fake --dir "$REPO" --timeout --bg "tarefa" 2>&1 || true)"
+case "$OUT" in *"precisa de um valor"*) ok "flag não engole a flag seguinte";; *) bad "flag não engole a flag seguinte" "$OUT";; esac
+OUT="$("$TEAM_ISOLATED" note lead --dir "$REPO" 2>&1 || true)"
+case "$OUT" in *"usage: team note"*|*"noted"*) ok "note sem texto não estoura";; *) bad "note sem texto não estoura" "$OUT";; esac
+
 printf '%s\n' "— the team talking"
 "$TEAM_ISOLATED" note lead --dir "$REPO" "the contract is in README" >/dev/null 2>&1
 check "note lands on the board"        "$TEAM_ISOLATED board --dir $REPO | grep -q 'contract is in README'"
