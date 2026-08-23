@@ -214,6 +214,11 @@ PY
   # per-minute ones. So look for the throttle first: if they told us when to
   # come back, or called it a rate limit, it is a short bench — not a ban.
   case "$tail_text" in
+    # Modelo aposentado não é cota: esperar não resolve, e tratar como cota
+    # esconderia a causa. A Groq aposentou a llama-3.3-70b-versatile e todo
+    # cliente que a fixava passou a levar 404 em cada chamada.
+    *"[modelo]"*|*"does not exist"*|*"model_not_found"*|*"decommissioned"*|*"has been deprecated"*)
+      reason="modelo indisponível — rode: team models $agent"; secs=1800 ;;
     *"rate_limit_exceeded"*|*"try again in"*|*"rate limit"*|*"too many requests"*|*"retry-after"*)
       reason="rate limited"; secs=300 ;;
     *"insufficient_quota"*|*"insufficient quota"*|*"out of credit"*|*"credit balance"*|\
@@ -918,6 +923,28 @@ cmd_watch() {
   exec python3 "$supervisor" "$@"
 }
 
+# team models <agente> — o que o fornecedor ainda serve. Existe por causa de um
+# modelo aposentado sem aviso: sem esta lista, a única pista é um 404 seco.
+cmd_models() {
+  local id="${1:-}"
+  [ -n "$id" ] || die "usage: team models <agent>"
+  local base key
+  base="$(meta "$id" CLOUD_BASE_URL)"; key="$(meta "$id" CLOUD_KEY_ENV)"
+  [ -n "$base" ] || die "$id não é um agente de API — os modelos dele vêm da própria CLI"
+  local script="import json,os,sys,urllib.request
+base=sys.argv[1]; nome=sys.argv[2]
+chave=os.environ.get(nome,'')
+if not chave: print('sem '+nome); raise SystemExit(1)
+req=urllib.request.Request(base.rstrip('/')+'/models', headers={'Authorization':'Bearer '+chave,'User-Agent':'ia-team','Accept':'application/json'})
+dados=json.load(urllib.request.urlopen(req, timeout=20))
+for m in sorted(x.get('id','') for x in dados.get('data', [])): print(' ', m)"
+  if [ -n "${!key:-}" ]; then
+    python3 -c "$script" "$base" "$key"
+  else
+    claude-autonomous run "$key" -- python3 -c "$script" "$base" "$key"
+  fi
+}
+
 usage() {
   cat <<'USAGE'
 team — run the other AIs as a team, in parallel, and review what they bring back
@@ -925,6 +952,7 @@ team — run the other AIs as a team, in parallel, and review what they bring ba
   team doctor                      who is available, signed in, and has quota
   team agents                      the roster and what each one is good at
   team hire [name]                 how to add someone who is not set up yet
+  team models <agent>              which models that provider still serves
   team quota [--clear [agent]]     who is out of quota, and until when
   team watch [--interval s]        supervise running agents: quota, stalls, errors
 
@@ -973,6 +1001,7 @@ main() {
     wait)        [ $# -ge 1 ] || die "usage: team wait <id>"; wait_run "$1"; cmd_show "$1" ;;
     suggest)     cmd_suggest "$@" ;;
     watch)       cmd_watch "$@" ;;
+    models)      cmd_models "$@" ;;
     port)        cmd_port "$@" ;;
     version|-V|--version) say "team $VERSION" ;;
     help|-h|--help) usage ;;

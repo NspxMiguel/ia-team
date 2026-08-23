@@ -7,7 +7,8 @@ directory, and it works until it reports back.
 
 Standard library only — it has to run on the python3 that ships with macOS.
 
-Exit codes: 0 done, 2 error, 3 quota/rate limit exhausted, 4 timed out.
+Exit codes: 0 done, 2 error, 3 quota/rate limit exhausted, 4 timed out,
+5 the model no longer exists at the provider.
 """
 import argparse
 import json
@@ -173,6 +174,15 @@ def tool_schema(readonly):
     return tools
 
 
+class ModelGone(Exception):
+    """O modelo pedido não existe mais no fornecedor.
+
+    Acontece de verdade: a Groq aposentou llama-3.3-70b-versatile e todo cliente
+    que a fixava passou a receber 404 em cada chamada. Não é cota, não adianta
+    esperar — alguém precisa trocar o nome do modelo.
+    """
+
+
 class TooLarge(Exception):
     """The request no longer fits the provider's per-request budget.
 
@@ -241,6 +251,10 @@ def call_api(base_url, key, model, messages, tools, timeout, temperature):
             raise QuotaExhausted("HTTP 429: %s" % detail, retry, hard)
         if exc.code in (401, 402, 403) and any(m in low for m in QUOTA_MARKS):
             raise QuotaExhausted("HTTP %d: %s" % (exc.code, detail), 0, True)
+        if exc.code in (400, 404) and any(m in low for m in (
+                "does not exist", "model_not_found", "decommissioned",
+                "has been deprecated", "unknown model", "invalid model")):
+            raise ModelGone(detail)
         if exc.code == 413 or "request too large" in low or "context length" in low \
                 or "too many tokens" in low:
             raise TooLarge(detail)
@@ -345,6 +359,9 @@ def main():
                     return 3
                 log("[team] rate limited, waiting %.1fs and carrying on" % wait)
                 time.sleep(wait)
+            except ModelGone as exc:
+                log("[MODELO] %s" % exc)
+                return 5
             except TooLarge as exc:
                 if keep <= 6:
                     log("[team] the request is too large even with a short history")
