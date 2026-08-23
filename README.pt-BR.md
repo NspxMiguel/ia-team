@@ -61,6 +61,12 @@ diz quem está disponível agora.
 | `opencode` | `opencode run` | A opinião de outro provedor |
 | `cursor` | `cursor-agent -p` | Frontend, mudança espalhada em muitos arquivos |
 
+O `cursor` roda em **`cursor-grok-4.6-high`**, não em `auto`. As famílias
+`cursor-grok-*` e `composer-*` são as de limite grande; `auto` escolhe sozinho e
+escolhe caro, e numa conta emprestada isso é cota de outra pessoa. Pedir um modelo
+de fora dessas duas famílias é recusado antes da chamada — `TEAM_CURSOR_MODEL`
+troca o padrão, `TEAM_CURSOR_ANY_MODEL=1` levanta a trava.
+
 **Colegas por API** — um agente pequeno (`runner/cloud_agent.py`) dá ferramentas
 de arquivo a eles, então editam o repositório em vez de descrever um patch:
 

@@ -59,6 +59,12 @@ available right now.
 | `opencode` | `opencode run` | Another provider's opinion |
 | `cursor` | `cursor-agent -p` | Frontend, edits spread across many files |
 
+`cursor` runs on **`cursor-grok-4.6-high`**, not on `auto`. The `cursor-grok-*`
+and `composer-*` families are the ones with the large limits; `auto` picks for
+itself and picks expensive, which on a shared account spends someone else's quota.
+A model outside those two families is refused before the call — `TEAM_CURSOR_MODEL`
+changes the default, `TEAM_CURSOR_ANY_MODEL=1` lifts the guard.
+
 **API teammates** — a small agent loop (`runner/cloud_agent.py`) gives them file
 tools, so they edit the repository instead of describing a patch:
 
