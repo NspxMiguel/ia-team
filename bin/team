@@ -155,7 +155,11 @@ print(max(0, left))
 PY
 }
 quota_mark() { # quota_mark <agent> <seconds> <reason>
+  # Nome sem adaptador é rastro de teste, não agente: barrar aqui evita que o
+  # estado de verdade vire depósito de nomes que nunca existiram.
+  adapter_file "$1" >/dev/null 2>&1 || return 0
   mkdir -p "$STATE_DIR"
+  # aproveita e varre o que já venceu
   python3 - "$QUOTA_FILE" "$1" "$2" "$3" <<'PY'
 import json, os, sys, time
 path, agent, secs, reason = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
@@ -165,8 +169,9 @@ if os.path.exists(path):
         data = json.load(open(path))
     except ValueError:
         pass
-data[agent] = {"until": int(time.time()) + secs, "reason": reason[:200],
-               "since": int(time.time())}
+agora = int(time.time())
+data = {a: v for a, v in data.items() if v.get("until", 0) > agora}
+data[agent] = {"until": agora + secs, "reason": reason[:200], "since": agora}
 json.dump(data, open(path, "w"), indent=2)
 PY
 }
@@ -188,8 +193,23 @@ PY
 detect_quota() { # detect_quota <agent> <logfile> <exitcode>
   local agent="$1" log="$2" rc="$3" tail_text secs=3600 reason=""
   [ -f "$log" ] || return 1
-  [ "$rc" -eq 0 ] && ! grep -q '\[QUOTA\]' "$log" && return 1
-  tail_text="$(tail -40 "$log" 2>/dev/null | tr 'A-Z' 'a-z')"
+  # O marcador do nosso runner abre a linha. Procurar solto pegava qualquer
+  # agente que estivesse escrevendo código sobre cota — foi assim que o Codex
+  # levou 159h de bênção por implementar o detector.
+  [ "$rc" -eq 0 ] && ! grep -q '^\[QUOTA\]' "$log" && return 1
+  # E o briefing volta ecoado no log: se ele fala de limites (um contrato sobre
+  # cota, por exemplo), o eco não é prova de nada. Fora as linhas do brief.
+  local brief_file="${log%/*}/brief.md"
+  tail_text="$(python3 - "$log" "$brief_file" <<'PY'
+import os, sys
+log, brief = sys.argv[1], sys.argv[2]
+do_brief = set()
+if os.path.exists(brief):
+    do_brief = {l.strip() for l in open(brief, errors="replace") if len(l.strip()) > 12}
+linhas = open(log, errors="replace").read().splitlines()[-60:]
+print("\n".join(l for l in linhas if l.strip() not in do_brief).lower())
+PY
+)"
   # Providers bolt "upgrade your plan" onto every 429, including the harmless
   # per-minute ones. So look for the throttle first: if they told us when to
   # come back, or called it a rate limit, it is a short bench — not a ban.
