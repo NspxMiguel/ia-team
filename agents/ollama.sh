@@ -8,6 +8,7 @@ ADAPTER_INSTALL="brew install ollama, then: ollama serve (in another terminal)"
 ADAPTER_KEY_ENV=""
 
 CLOUD_BASE_URL="http://localhost:11434/v1"
+CLOUD_KEY_OPTIONAL=1
 CLOUD_KEY_ENV=""
 CLOUD_MODEL="qwen2.5-coder"
 CLOUD_ASK_MODEL=""

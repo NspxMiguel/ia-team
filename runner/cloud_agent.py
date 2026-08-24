@@ -533,8 +533,8 @@ def main():
                          "have small tokens-per-minute budgets)")
     args = ap.parse_args()
 
-    key = os.environ.get(args.key_env, "")
-    if not key:
+    key = os.environ.get(args.key_env, "") or os.environ.get("CLOUD_KEY_ENV_VALOR", "")
+    if not key and not args.base_url.startswith(("http://localhost", "http://127.0.0.1")):
         log("no %s in the environment" % args.key_env)
         return 2
 

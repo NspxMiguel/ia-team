@@ -8,6 +8,7 @@ ADAPTER_INSTALL="brew install --cask lmstudio, then enable LM Studio Server"
 ADAPTER_KEY_ENV=""
 
 CLOUD_BASE_URL="http://localhost:1234/v1"
+CLOUD_KEY_OPTIONAL=1
 CLOUD_KEY_ENV=""
 CLOUD_MODEL="qwen2.5-coder"
 CLOUD_ASK_MODEL=""

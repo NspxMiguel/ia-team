@@ -8,9 +8,10 @@ ADAPTER_INSTALL="run omniroute locally on port 20128, see: https://omniroute.ai"
 ADAPTER_KEY_ENV="OMNIROUTE_API_KEY"
 
 CLOUD_BASE_URL="http://localhost:20128/v1"
+CLOUD_KEY_OPTIONAL=1
 CLOUD_KEY_ENV="OMNIROUTE_API_KEY"
-CLOUD_MODEL="gpt-4o"
-CLOUD_ASK_MODEL=""
+CLOUD_MODEL="auto/best-coding"
+CLOUD_ASK_MODEL="auto/best-fast"
 
 . "$TEAM_LIB/cloud.sh"
 

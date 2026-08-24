@@ -50,6 +50,10 @@ _cloud_exec() { # _cloud_exec <mode> <dir> <brief> <model>
 
   if [ -n "${!CLOUD_KEY_ENV:-}" ]; then
     "${args[@]}"
+  elif [ "${CLOUD_KEY_OPTIONAL:-0}" = "1" ]; then
+    # Gateway na própria máquina (OmniRoute, Ollama, LM Studio, vLLM) não pede
+    # credencial: exigir uma só faria o agente falhar por burocracia.
+    CLOUD_KEY_ENV_VALOR="local" "${args[@]}"
   else
     claude-autonomous run "$CLOUD_KEY_ENV" -- "${args[@]}"
   fi

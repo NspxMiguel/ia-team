@@ -8,6 +8,7 @@ ADAPTER_INSTALL="pip install vllm, then: vllm serve <model>"
 ADAPTER_KEY_ENV="VLLM_API_KEY"
 
 CLOUD_BASE_URL="http://localhost:8000/v1"
+CLOUD_KEY_OPTIONAL=1
 CLOUD_KEY_ENV="VLLM_API_KEY"
 CLOUD_MODEL="qwen2.5-coder"
 CLOUD_ASK_MODEL=""
