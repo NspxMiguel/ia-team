@@ -463,6 +463,25 @@ exige_valor() {
   case "$2" in -*) die "$1 precisa de um valor (veio \"$2\")" ;; esac
 }
 
+# Time inteiro no banco é o momento em que a pessoa mais precisa de informação:
+# quem volta primeiro, quando, e que existe reforço grátis a um comando.
+sem_ninguem() {
+  printf '%s\n' "${RED}ninguém está livre agora.${RST}" >&2
+  local a left melhor="" melhor_t=0
+  for a in $(adapter_ids); do
+    left="$(quota_left "$a")"
+    if [ "$left" -gt 0 ] 2>/dev/null; then
+      printf '  %s◔%s %-12s volta em %s\n' "$CYN" "$RST" "$a" "$(human_time "$left")" >&2
+      if [ "$melhor_t" -eq 0 ] || [ "$left" -lt "$melhor_t" ]; then melhor="$a"; melhor_t="$left"; fi
+    fi
+  done
+  if [ -n "$melhor" ]; then
+    printf '\n  o primeiro a voltar é %s, em %s\n' "$melhor" "$(human_time "$melhor_t")" >&2
+  fi
+  cmd_suggest >&2 || true
+  exit 1
+}
+
 parse_common() {
   DIR="$PWD"; MODEL=""; TIMEOUT=900; BG=0; PLACE="worktree"; BY=""; ATTACH=(); REST=()
   while [ $# -gt 0 ]; do
@@ -626,7 +645,8 @@ cmd_run() {
       warn "$agent is not available (${st#*|}) — handing this to $alt instead"
       agent="$alt"
     else
-      die "$agent is not available: ${st#*|} (and nobody else is free)"
+      warn "$agent está fora: ${st#*|}"
+      sem_ninguem
     fi
   fi
   local id; id="$(start_run "$agent" "$DIR" "$prompt" "$TIMEOUT" "$PLACE" "$MODEL" "${ATTACH[@]:-}")"
@@ -644,7 +664,7 @@ cmd_sprint() {
   parse_common "$@"
   [ ${#REST[@]} -gt 0 ] || die "usage: team sprint \"task one\" \"agent: task two\" ..."
   local free; free="$(ready_agents | tr '\n' ' ')"
-  [ -n "$free" ] || die "nobody available. run: team doctor"
+  [ -n "$free" ] || sem_ninguem
   # Fila maior que a equipe é exatamente quando vale oferecer reforço — e o
   # cmd_suggest já se cala sozinho se a pessoa mandou calar.
   local livres; livres="$(printf '%s\n' $free | wc -l | tr -d ' ')"

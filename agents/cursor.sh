@@ -37,7 +37,8 @@ _cursor_modelo() {
 _cursor() { # _cursor <force?> <dir> <brief> <model>
   local force="$1" dir="$2" brief="$3" model
   model="$(_cursor_modelo "${4:-}")" || return 1
-  local args=(-p "$(cat "$brief")" --output-format text -m "$model")
+  # --model, não -m: o cursor-agent recusa a forma curta com "unknown option".
+  local args=(-p "$(cat "$brief")" --output-format text --model "$model")
   [ "$force" = "write" ] && args+=(--force)
   ( cd "$dir" && cursor-agent "${args[@]}" )
 }
