@@ -3,7 +3,7 @@ ADAPTER_ID="omniroute"
 ADAPTER_LABEL="Omniroute (local gateway)"
 ADAPTER_KIND="cloud"
 ADAPTER_BIN="python3"
-ADAPTER_TAGS="local gateway, multi-provider, optional key"
+ADAPTER_TAGS="roteia sozinho entre 125 modelos, sem chave, local gateway, multi-provider, optional key"
 ADAPTER_INSTALL="run omniroute locally on port 20128, see: https://omniroute.ai"
 ADAPTER_KEY_ENV="OMNIROUTE_API_KEY"
 
@@ -12,6 +12,9 @@ CLOUD_KEY_OPTIONAL=1
 CLOUD_KEY_ENV="OMNIROUTE_API_KEY"
 CLOUD_MODEL="auto/best-coding"
 CLOUD_ASK_MODEL="auto/best-fast"
+# O gateway roteia sozinho entre mais de cem modelos; estes são os atalhos que
+# valem a pena lembrar na hora de passar --model.
+CLOUD_MODELOS_SUGERIDOS="auto/best-coding auto/best-reasoning auto/best-fast auto/best-vision auto/pro-coding auto/pro-reasoning"
 
 . "$TEAM_LIB/cloud.sh"
 

@@ -79,6 +79,8 @@ probe() {
 ready_agents() {
   local a st
   for a in $(adapter_ids); do
+    # Em poupança, o Claude não entra em sorteio nenhum: só sob pedido explícito.
+    if [ "$a" = "claude" ] && poupanca_ativa; then continue; fi
     st="$(probe "$a")"
     if [ "${st%%|*}" = "ok" ]; then printf '%s\n' "$a"; fi
   done
@@ -270,6 +272,74 @@ PY
   return 0
 }
 
+
+# ---------------------------------------------------------------- poupança ---
+# Não existe jeito local de perguntar ao Claude Code quanto resta da janela de
+# cinco horas — procurei arquivo de estado, subcomando e o JSON de saída, e não
+# há campo nenhum. O que existe é: (1) o aviso que ele mesmo imprime quando a
+# janela está acabando, e (2) o custo por chamada, que dá para somar. Com esses
+# dois, o time deixa o Claude de lado antes de ele bater no muro.
+POUPANCA_FILE="$STATE_DIR/poupanca.json"
+
+poupanca_ativa() {
+  [ -s "$POUPANCA_FILE" ] || return 1
+  python3 - "$POUPANCA_FILE" <<'PY'
+import json, sys, time
+try:
+    d = json.load(open(sys.argv[1]))
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if d.get("ate", 0) > time.time() else 1)
+PY
+}
+
+poupanca_ligar() { # poupanca_ligar <segundos> <motivo>
+  mkdir -p "$STATE_DIR"
+  python3 - "$POUPANCA_FILE" "$1" "$2" <<'PY'
+import json, sys, time
+json.dump({"ate": int(time.time()) + int(sys.argv[2]), "motivo": sys.argv[3],
+           "desde": int(time.time())}, open(sys.argv[1], "w"), indent=2)
+PY
+  printf '%s\n' "${YEL}NÃO USANDO O CLAUDE, POUCA COTA DETECTADA${RST}" >&2
+  printf '  %s%s%s\n' "$DIM" "$2" "$RST" >&2
+  printf '  %so trabalho vai para o resto do time; para insistir mesmo assim: team run claude --com-claude ...%s\n' "$DIM" "$RST" >&2
+}
+
+cmd_poupanca() {
+  case "${1:-status}" in
+    on|ligar)    poupanca_ligar "${2:-18000}" "ligada à mão"; ;;
+    off|desligar) rm -f "$POUPANCA_FILE"; say "poupança desligada — o Claude volta ao time" ;;
+    *)
+      if poupanca_ativa; then
+        python3 - "$POUPANCA_FILE" <<'PY'
+import json, sys, time
+d = json.load(open(sys.argv[1]))
+falta = int(d["ate"] - time.time())
+print("poupança LIGADA — o Claude está fora do time")
+print("  motivo: %s" % d.get("motivo", "-"))
+print("  volta em %dh%02dm" % (falta // 3600, (falta % 3600) // 60))
+PY
+      else
+        say "poupança desligada — o Claude está no time"
+      fi ;;
+  esac
+}
+
+# O Claude Code avisa antes de bater no teto; o aviso é o sinal mais confiável
+# que existe sem inventar número.
+detect_poupanca() { # detect_poupanca <agente> <log>
+  [ "$1" = "claude" ] || return 1
+  [ -f "$2" ] || return 1
+  local texto; texto="$(tail -25 "$2" 2>/dev/null | tr 'A-Z' 'a-z')"
+  case "$texto" in
+    *"approaching"*"limit"*|*"running low"*|*"5-hour limit"*|*"five-hour limit"*|\
+    *"limite de 5 horas"*|*"pouca cota"*)
+      poupanca_ligar 18000 "o próprio Claude avisou que a janela de 5 horas está no fim"
+      return 0 ;;
+  esac
+  return 1
+}
+
 # ------------------------------------------------------------------ board ---
 # The team's shared wall. Every brief carries the recent notes, so the next
 # agent starts where the last one stopped.
@@ -408,7 +478,11 @@ cmd_doctor() {
   for id in $(adapter_ids); do
     total=$((total+1))
     st="$(probe "$id")"; state="${st%%|*}"; detail="${st#*|}"
+    if [ "$id" = "claude" ] && poupanca_ativa; then
+      state="poupado"; detail="fora por poupança — a janela de 5h está no fim (team poupanca off para voltar)"
+    fi
     case "$state" in
+      poupado)  printf '  %s◑%s %-12s %s\n' "$YEL" "$RST" "$id" "$detail" ;;
       ok)       printf '  %s✓%s %-12s %s\n' "$GRN" "$RST" "$id" "$detail"; ok=$((ok+1)) ;;
       cooldown) printf '  %s◔%s %-12s %s\n' "$CYN" "$RST" "$id" "$detail" ;;
       noauth)   printf '  %s!%s %-12s %s\n' "$YEL" "$RST" "$id" "$detail" ;;
@@ -486,7 +560,7 @@ sem_ninguem() {
 }
 
 parse_common() {
-  DIR="$PWD"; MODEL=""; TIMEOUT=900; BG=0; PLACE="worktree"; BY=""; ATTACH=(); REST=()
+  DIR="$PWD"; MODEL=""; TIMEOUT=900; BG=0; PLACE="worktree"; BY=""; COM_CLAUDE=0; ATTACH=(); REST=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --dir)      exige_valor "$@"; DIR="$2"; shift 2 ;;
@@ -498,6 +572,7 @@ parse_common() {
       --here)     PLACE="here"; shift ;;
       --worktree) PLACE="worktree"; shift ;;
       --bg)       BG=1; shift ;;
+      --com-claude) COM_CLAUDE=1; shift ;;
       --)         shift; REST+=("$@"); break ;;
       -*)         die "unknown option: $1" ;;
       *)          REST+=("$1"); shift ;;
@@ -617,6 +692,7 @@ start_run() {
     fi
     cat "$d/report.md" >>"$d/log.txt" 2>/dev/null || true
     detect_quota "$agent" "$d/log.txt" "$rc" >/dev/null 2>&1 || true
+    detect_poupanca "$agent" "$d/log.txt" >/dev/null 2>&1 || true
     json_meta "$d/meta.json" status "$([ "$rc" -eq 0 ] && echo done || echo failed)" exit "$rc"
     board_add "$dir" "$agent" "$(tail -8 "$d/report.md" 2>/dev/null | tr '\n' ' ' | cut -c1-400)"
     harvest_tips "$dir" "$agent" "$d/report.md"
@@ -641,6 +717,13 @@ cmd_run() {
   parse_common "$@"
   local prompt="${REST[*]:-}"
   [ -n "$prompt" ] || die "no task given. usage: team run <agent> \"task\""
+  if [ "$agent" = "claude" ] && [ "${COM_CLAUDE:-0}" -eq 0 ] && poupanca_ativa; then
+    warn "NÃO USANDO O CLAUDE, POUCA COTA DETECTADA"
+    local alt2; alt2="$(pick_agent "$prompt" claude)"
+    [ -n "$alt2" ] || die "e não há mais ninguém livre — use --com-claude para insistir"
+    say "${DIM}passando para $alt2${RST}"
+    agent="$alt2"
+  fi
   local st; st="$(probe "$agent")"
   if [ "${st%%|*}" != "ok" ]; then
     local alt; alt="$(pick_agent "$prompt" "$agent")"
@@ -1056,6 +1139,7 @@ team — run the other AIs as a team, in parallel, and review what they bring ba
   team models --refresh            re-check every provider and record what changed
   team telemetry --show|--enable   optional, anonymous counters about what fails
   team quota [--clear [agent]]     who is out of quota, and until when
+  team poupanca [on|off]           deixa o Claude de fora quando a janela dele está no fim
   team watch [--interval s]        supervise running agents: quota, stalls, errors
 
   team run <agent> "task"          one task, isolated git worktree, patch out
@@ -1125,6 +1209,7 @@ main() {
     wait)        [ $# -ge 1 ] || die "usage: team wait <id>"; wait_run "$1"; cmd_show "$1" ;;
     suggest)     cmd_suggest "$@" ;;
     watch)       cmd_watch "$@" ;;
+    poupanca|poupança) cmd_poupanca "$@" ;;
     tidy)        cmd_tidy "$@" ;;
     models)      if [ "${1:-}" = "--refresh" ]; then shift; cmd_ferramenta team-models "$@"; else cmd_models "$@"; fi ;;
     telemetry)   cmd_ferramenta team-telemetry "$@" ;;

@@ -178,6 +178,27 @@ printf 'my own notes\n' | cat - "$REPO/AGENTS.md" > "$REPO/tmp" && mv "$REPO/tmp
 check "port keeps what was there"      "grep -q 'my own notes' '$REPO/AGENTS.md'"
 check "port does not duplicate itself" "[ \$(grep -c 'ia-team:start' '$REPO/AGENTS.md') -eq 1 ]"
 
+printf '%s\n' "— poupança do Claude"
+cat > "$IA_TEAM_HOME/agents/claude.sh" <<'ADAPTER'
+ADAPTER_ID="claude"; ADAPTER_LABEL="Claude (teste)"; ADAPTER_BIN="true"; ADAPTER_TAGS="segunda leitura"; ADAPTER_INSTALL="-"
+adapter_probe() { echo "ok|claude de teste"; }
+adapter_ask() { echo "resposta"; }
+adapter_run() { printf 'c\n' > "$1/claude.txt"; echo "escrevi"; }
+ADAPTER
+"$TEAM_ISOLATED" poupanca off >/dev/null 2>&1
+check "claude no time quando não há poupança" "$TEAM_ISOLATED doctor | grep -q 'claude'"
+OUT="$("$TEAM_ISOLATED" poupanca on 300 2>&1)"
+case "$OUT" in *"POUCA COTA DETECTADA"*) ok "poupança avisa com a mensagem certa";; *) bad "poupança avisa com a mensagem certa" "$OUT";; esac
+check "doctor mostra o claude poupado"   "$TEAM_ISOLATED doctor | grep -q 'poupança'"
+OUT="$("$TEAM_ISOLATED" run claude --dir "$REPO" "tarefa" 2>&1)"
+case "$OUT" in *"POUCA COTA DETECTADA"*) ok "pedir o claude em poupança avisa";; *) bad "pedir o claude em poupança avisa" "$OUT";; esac
+case "$OUT" in *"passando para"*|*"não há mais ninguém"*) ok "a tarefa é repassada";; *) bad "a tarefa é repassada" "$OUT";; esac
+"$TEAM_ISOLATED" run claude --com-claude --dir "$REPO" "tarefa forçada" >/dev/null 2>&1
+IDC="$(ls -1t "$IA_TEAM_HOME/runs" | head -1)"
+check "--com-claude usa o claude mesmo assim" "[ \"\$(python3 -c \"import json;print(json.load(open('$IA_TEAM_HOME/runs/$IDC/meta.json'))['agent'])\")\" = claude ]"
+"$TEAM_ISOLATED" poupanca off >/dev/null 2>&1
+check "poupança desliga"                 "! $TEAM_ISOLATED poupanca | grep -q LIGADA"
+
 printf '%s\n' "— limits"
 cat > "$IA_TEAM_HOME/agents/slow.sh" <<'ADAPTER'
 ADAPTER_ID="slow"; ADAPTER_LABEL="Slow agent"; ADAPTER_BIN="true"; ADAPTER_TAGS="testing"; ADAPTER_INSTALL="-"

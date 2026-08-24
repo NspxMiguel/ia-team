@@ -144,6 +144,29 @@ própria máquina, com roteamento automático (`auto/best-coding`,
 `auto/best-fast`) sobre mais de cem modelos e sem chave nenhuma. É o caminho
 mais barato quando o trabalho é volume.
 
+## Poupar o Claude quando a janela dele acaba
+
+O Claude Code trabalha em janelas de cinco horas, e bater no teto no meio de uma
+tarefa é o pior momento possível. Não existe forma local de perguntar quanto
+resta — procurei subcomando, arquivo de estado e o JSON de saída, e não há campo
+nenhum. O que existe é o aviso que ele mesmo imprime quando a janela está no
+fim, e é esse o gatilho.
+
+Quando o aviso aparece, o time entra em **poupança**: o Claude sai da escalação,
+qualquer tarefa endereçada a ele é repassada a quem estiver livre, e a tela diz
+`NÃO USANDO O CLAUDE, POUCA COTA DETECTADA`.
+
+```bash
+team poupanca              # como está
+team poupanca on|off       # ligar ou desligar à mão
+team run claude --com-claude "..."   # insistir mesmo assim
+```
+
+Poupança não é castigo: é reservar o que sobrou para quando só o Claude serve —
+a revisão final, a decisão de arquitetura, o julgamento que fecha a tarefa. O
+volume vai para quem tem cota de sobra, e o `omniroute` é o mais barato de
+todos, porque roteia sozinho entre mais de cem modelos sem gastar chave nenhuma.
+
 ## O time se mantém sozinho
 
 Fornecedor aposenta modelo sem avisar e plano grátis muda de regra — foi assim
