@@ -59,6 +59,8 @@ fetch port/TEAM.md "$TEAM_HOME/port/TEAM.md"
 say "-> the supervisor"
 mkdir -p "$TEAM_HOME/bin"
 fetch bin/team-watch "$TEAM_HOME/bin/team-watch"
+fetch bin/team-models "$TEAM_HOME/bin/team-models"
+fetch bin/team-telemetry "$TEAM_HOME/bin/team-telemetry"
 fetch lib/quota.py "$TEAM_HOME/lib/quota.py"
 
 say "-> the nudge that starts the sprint on its own"
@@ -94,6 +96,26 @@ case ":$PATH:" in
   *) say ""; say "   note: $BIN_DIR is not on your PATH. Add this to your shell profile:"
      say "     export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
 esac
+
+# A coleta é opcional e nasce desligada. Perguntamos só quando há alguém no
+# terminal: instalação por pipe não tem como responder, e o silêncio ali não
+# pode virar um "sim".
+if [ -t 0 ]; then
+  say ""
+  say "Quer ajudar a manter o projeto funcionando?"
+  say "O ia-team pode guardar contadores anônimos do que falha aqui — por agente,"
+  say "modelo e causa (cota, modelo aposentado, tempo esgotado). Nada de código,"
+  say "caminho, briefing ou chave. Fica no seu disco; nada é enviado sozinho."
+  printf "Ligar essa coleta? [s/N] "
+  read -r resposta || resposta=""
+  case "$resposta" in
+    s|S|y|Y) python3 "$TEAM_HOME/bin/team-telemetry" --enable >/dev/null 2>&1 && say "   ligada — desligue quando quiser com: team telemetry --disable" ;;
+    *) say "   deixando desligada. Se mudar de ideia: team telemetry --enable" ;;
+  esac
+else
+  say ""
+  say "Coleta anônima de falhas: desligada. Para ligar: team telemetry --enable"
+fi
 
 say ""
 "$BIN_DIR/team" doctor || true

@@ -1,0 +1,546 @@
+#!/usr/bin/env python3
+"""Discover the models exposed by ia-team cloud adapters."""
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+
+
+STATE_VERSION = 1
+FETCH_TIMEOUT = 20
+ADAPTER_KEYS = (
+    "ADAPTER_ID",
+    "CLOUD_BASE_URL",
+    "CLOUD_KEY_ENV",
+    "CLOUD_MODEL",
+    "CLOUD_ASK_MODEL",
+    "CLOUD_KEY_OPTIONAL",
+)
+ASSIGNMENT = re.compile(
+    r"^\s*(?:export\s+)?(" + "|".join(ADAPTER_KEYS) + r")\s*=\s*(.*?)\s*$"
+)
+
+
+class FetchError(Exception):
+    """A model endpoint could not be read."""
+
+
+def utc_now():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
+
+
+def parse_assignment(value):
+    """Parse a literal shell assignment without sourcing the adapter."""
+    try:
+        words = shlex.split(value, comments=True, posix=True)
+    except ValueError:
+        return None
+    if len(words) != 1:
+        return "" if not words else None
+    return words[0]
+
+
+def read_adapter(path):
+    values = {}
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                match = ASSIGNMENT.match(line)
+                if not match:
+                    continue
+                value = parse_assignment(match.group(2))
+                if value is not None:
+                    values[match.group(1)] = value
+    except OSError:
+        return None
+
+    if not values.get("CLOUD_BASE_URL") or "CLOUD_MODEL" not in values:
+        return None
+    return {
+        "id": values.get("ADAPTER_ID") or path.stem,
+        "base_url": values["CLOUD_BASE_URL"],
+        "key_env": values.get("CLOUD_KEY_ENV", ""),
+        "default_model": values.get("CLOUD_MODEL", ""),
+        "ask_model": values.get("CLOUD_ASK_MODEL", ""),
+        "key_optional": values.get("CLOUD_KEY_OPTIONAL", "0") == "1",
+    }
+
+
+def discover_adapters(team_home):
+    adapters = {}
+    adapter_dir = Path(team_home) / "agents"
+    if not adapter_dir.is_dir():
+        return adapters
+    for path in sorted(adapter_dir.glob("*.sh")):
+        adapter = read_adapter(path)
+        if adapter:
+            adapters[adapter["id"]] = adapter
+    return adapters
+
+
+def models_url(base_url):
+    return base_url.rstrip("/") + "/models"
+
+
+def request_json(url, key_env):
+    key = os.environ.get(key_env, "") if key_env else ""
+    headers = {"Accept": "application/json", "User-Agent": "ia-team"}
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT) as response:
+            return json.load(response)
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as exc:
+        raise FetchError(str(exc))
+
+
+def fetch_through_keychain(url, key_env):
+    executable = shutil.which("claude-autonomous")
+    if not executable:
+        raise FetchError("chave indisponível")
+    command = [
+        executable,
+        "run",
+        key_env,
+        "--",
+        sys.executable,
+        os.path.abspath(__file__),
+        "--_fetch",
+        url,
+        key_env,
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=FETCH_TIMEOUT + 5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise FetchError(str(exc))
+    if result.returncode:
+        detail = result.stderr.strip().splitlines()
+        raise FetchError(detail[-1][:300] if detail else "chave indisponível")
+    try:
+        return json.loads(result.stdout)
+    except ValueError:
+        raise FetchError("resposta inválida de claude-autonomous")
+
+
+def fetch_adapter(adapter):
+    url = models_url(adapter["base_url"])
+    key_env = adapter["key_env"]
+    if not key_env or adapter["key_optional"] or os.environ.get(key_env):
+        return request_json(url, key_env)
+    return fetch_through_keychain(url, key_env)
+
+
+def boolean_marker(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("true", "yes", "free", "free_tier"):
+            return True
+        if normalized in ("false", "no", "paid"):
+            return False
+    return None
+
+
+def price_marker(value):
+    values = value.values() if isinstance(value, dict) else (value,)
+    prices = []
+    for price in values:
+        if isinstance(price, bool) or price is None:
+            continue
+        try:
+            prices.append(Decimal(str(price)))
+        except (InvalidOperation, ValueError):
+            continue
+    if not prices:
+        return None
+    return all(price == 0 for price in prices)
+
+
+def model_free_marker(model):
+    model_id = str(model.get("id", ""))
+    if model_id.lower().endswith(":free"):
+        return True
+    for name in ("free", "is_free", "free_tier", "isFree"):
+        if name in model:
+            marker = boolean_marker(model[name])
+            if marker is not None:
+                return marker
+    for name in ("tier", "access", "plan"):
+        if name in model:
+            marker = boolean_marker(model[name])
+            if marker is not None:
+                return marker
+    for name in ("pricing", "price", "cost"):
+        if name in model:
+            marker = price_marker(model[name])
+            if marker is not None:
+                return marker
+    return None
+
+
+def extract_models(payload):
+    if isinstance(payload, list):
+        raw_models = payload
+        root_free = None
+    elif isinstance(payload, dict):
+        raw_models = payload.get("data")
+        if not isinstance(raw_models, list):
+            raw_models = payload.get("models")
+        if not isinstance(raw_models, list):
+            raise FetchError("resposta de /models não contém uma lista")
+        root_free = None
+        for name in ("free_ids", "free_models", "free"):
+            if isinstance(payload.get(name), list):
+                root_free = {
+                    item.get("id") if isinstance(item, dict) else item
+                    for item in payload[name]
+                }
+                root_free = {item for item in root_free if isinstance(item, str)}
+                break
+    else:
+        raise FetchError("resposta de /models não é um objeto JSON")
+
+    ids = []
+    markers = {}
+    for item in raw_models:
+        if isinstance(item, str):
+            model_id = item
+            marker = None
+        elif isinstance(item, dict):
+            model_id = item.get("id")
+            marker = model_free_marker(item)
+        else:
+            continue
+        if not isinstance(model_id, str) or not model_id:
+            continue
+        ids.append(model_id)
+        markers[model_id] = marker
+
+    ids = sorted(set(ids), key=lambda item: item.lower())
+    if root_free is not None:
+        free_marked = True
+        free_ids = sorted(set(ids) & root_free, key=lambda item: item.lower())
+    else:
+        free_marked = any(marker is not None for marker in markers.values())
+        free_ids = sorted(
+            (model_id for model_id in ids if markers.get(model_id) is True),
+            key=lambda item: item.lower(),
+        )
+    return ids, free_ids, free_marked
+
+
+def family(model_id):
+    leaf = model_id.rsplit("/", 1)[-1].split(":", 1)[0].lower()
+    match = re.match(r"([a-z]+)", leaf)
+    return match.group(1) if match else leaf
+
+
+def model_tokens(model_id):
+    leaf = model_id.rsplit("/", 1)[-1].split(":", 1)[0].lower()
+    return set(re.findall(r"[a-z]+|\d+", leaf))
+
+
+def suggest_model(current, ids, free_ids, must_be_free=False):
+    if not current:
+        return None
+    candidates = [item for item in ids if item != current and family(item) == family(current)]
+    if must_be_free:
+        candidates = [item for item in candidates if item in set(free_ids)]
+    if not candidates:
+        return None
+    wanted = model_tokens(current)
+
+    def rank(candidate):
+        shared = len(wanted & model_tokens(candidate))
+        free = 1 if candidate in free_ids else 0
+        prefix = len(os.path.commonprefix([current.lower(), candidate.lower()]))
+        return (-free, -shared, -prefix, candidate.lower())
+
+    return sorted(candidates, key=rank)[0]
+
+
+def status_for(model, ids, free_ids, free_marked):
+    if not model:
+        return None, None
+    exists = model in ids
+    is_free = (model in free_ids) if free_marked else None
+    return exists, is_free
+
+
+def history_changes(previous, current, checked_at):
+    if not previous.get("checked_at"):
+        return None
+    old_ids = set(previous.get("ids", []))
+    new_ids = set(current["ids"])
+    event = {
+        "checked_at": checked_at,
+        "added": sorted(new_ids - old_ids),
+        "removed": sorted(old_ids - new_ids),
+    }
+    changed = bool(event["added"] or event["removed"])
+    if previous.get("free_marked") and current["free_marked"]:
+        old_free = set(previous.get("free_ids", []))
+        new_free = set(current["free_ids"])
+        event["became_free"] = sorted(new_free - old_free)
+        event["stopped_being_free"] = sorted(old_free - new_free)
+        changed = changed or bool(event["became_free"] or event["stopped_being_free"])
+    for name in (
+        "free_marked",
+        "default_model",
+        "default_exists",
+        "default_free",
+        "ask_model",
+        "ask_model_exists",
+        "ask_model_free",
+    ):
+        if previous.get(name) != current.get(name):
+            event[name] = current.get(name)
+            changed = True
+    return event if changed else None
+
+
+def base_record(previous, adapter):
+    record = dict(previous) if isinstance(previous, dict) else {}
+    record.update(
+        {
+            "base_url": adapter["base_url"],
+            "key_env": adapter["key_env"],
+            "default_model": adapter["default_model"],
+            "ask_model": adapter["ask_model"] or None,
+        }
+    )
+    record.setdefault("ids", [])
+    record.setdefault("free_ids", [])
+    record.setdefault("free_marked", False)
+    record.setdefault("default_exists", None)
+    record.setdefault("default_free", None)
+    record.setdefault("ask_model_exists", None)
+    record.setdefault("ask_model_free", None)
+    record.setdefault("suggestion", None)
+    record.setdefault("ask_suggestion", None)
+    record.setdefault("checked_at", None)
+    record.setdefault("history", [])
+    return record
+
+
+def checked_record(previous, adapter, payload, checked_at):
+    if not isinstance(previous, dict):
+        previous = {}
+    ids, free_ids, free_marked = extract_models(payload)
+    default_exists, default_free = status_for(
+        adapter["default_model"], ids, free_ids, free_marked
+    )
+    ask_exists, ask_free = status_for(
+        adapter["ask_model"], ids, free_ids, free_marked
+    )
+    record = base_record(previous, adapter)
+    record.update(
+        {
+            "ids": ids,
+            "free_ids": free_ids,
+            "free_marked": free_marked,
+            "default_exists": default_exists,
+            "default_free": default_free,
+            "ask_model_exists": ask_exists,
+            "ask_model_free": ask_free,
+            "checked_at": checked_at,
+            "last_attempt_at": checked_at,
+            "status": "ok",
+            "error": None,
+        }
+    )
+    default_problem = default_exists is False or default_free is False
+    ask_problem = ask_exists is False or ask_free is False
+    record["suggestion"] = (
+        suggest_model(
+            adapter["default_model"],
+            ids,
+            free_ids,
+            must_be_free=default_exists is True and default_free is False,
+        )
+        if default_problem
+        else None
+    )
+    record["ask_suggestion"] = (
+        suggest_model(
+            adapter["ask_model"],
+            ids,
+            free_ids,
+            must_be_free=ask_exists is True and ask_free is False,
+        )
+        if ask_problem
+        else None
+    )
+    event = history_changes(previous, record, checked_at)
+    history = previous.get("history", [])
+    if not isinstance(history, list):
+        history = []
+    record["history"] = list(history) + ([event] if event else [])
+    return record
+
+
+def unavailable_record(previous, adapter, attempted_at, error):
+    record = base_record(previous, adapter)
+    record.update(
+        {
+            "last_attempt_at": attempted_at,
+            "status": "unavailable",
+            "error": error[:300],
+        }
+    )
+    return record
+
+
+def load_state(path):
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            state = json.load(handle)
+        return state if isinstance(state, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def atomic_write(path, state):
+    descriptor, temporary = tempfile.mkstemp(
+        dir=str(path.parent), prefix=".models.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, indent=2, ensure_ascii=False, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, str(path))
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def positive_days(value):
+    try:
+        days = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("N deve ser um número inteiro")
+    if days < 0:
+        raise argparse.ArgumentTypeError("N não pode ser negativo")
+    return days
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(description="Atualiza o catálogo de modelos do ia-team.")
+    parser.add_argument("--once", action="store_true", help="força uma checagem agora")
+    parser.add_argument(
+        "--interval-dias",
+        type=positive_days,
+        default=None,
+        metavar="N",
+        help="intervalo mínimo entre checagens (padrão: 3)",
+    )
+    parser.add_argument("--quiet", action="store_true", help="não imprime progresso")
+    return parser.parse_args(argv)
+
+
+def run(argv=None):
+    args = parse_args(argv)
+    team_home = Path(os.environ.get("IA_TEAM_HOME", os.path.expanduser("~/.ia-team")))
+    state_dir = team_home / "state"
+    state_path = state_dir / "models.json"
+    lock_path = state_dir / "models.lock"
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        state = load_state(state_path)
+        stored_interval = state.get("interval_days", 3)
+        interval = args.interval_dias if args.interval_dias is not None else stored_interval
+        if not isinstance(interval, int) or interval < 0:
+            interval = 3
+        now_epoch = int(time.time())
+        previous_run = state.get("last_checked_epoch", 0)
+        if (
+            not args.once
+            and isinstance(previous_run, (int, float))
+            and now_epoch - previous_run < interval * 86400
+        ):
+            if not args.quiet:
+                remaining = interval * 86400 - (now_epoch - previous_run)
+                print("modelos: próxima checagem em %d segundo(s)" % max(0, remaining))
+            return 0
+
+        checked_at = utc_now()
+        adapters = discover_adapters(team_home)
+        previous_adapters = state.get("adapters", {})
+        if not isinstance(previous_adapters, dict):
+            previous_adapters = {}
+        records = {}
+        for adapter_id, adapter in adapters.items():
+            previous = previous_adapters.get(adapter_id, {})
+            if not isinstance(previous, dict):
+                previous = {}
+            try:
+                payload = fetch_adapter(adapter)
+                record = checked_record(previous, adapter, payload, checked_at)
+                records[adapter_id] = record
+                if not args.quiet:
+                    print("%s: %d modelo(s)" % (adapter_id, len(record["ids"])))
+            except FetchError as exc:
+                records[adapter_id] = unavailable_record(
+                    previous, adapter, checked_at, str(exc)
+                )
+                if not args.quiet:
+                    print("%s: indisponível (%s)" % (adapter_id, exc), file=sys.stderr)
+
+        state = {
+            "version": STATE_VERSION,
+            "interval_days": interval,
+            "last_checked_at": checked_at,
+            "last_checked_epoch": now_epoch,
+            "adapters": records,
+        }
+        atomic_write(state_path, state)
+    return 0
+
+
+def internal_fetch(argv):
+    if len(argv) != 3:
+        return 2
+    try:
+        payload = request_json(argv[1], argv[2])
+    except FetchError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    json.dump(payload, sys.stdout)
+    return 0
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--_fetch":
+        raise SystemExit(internal_fetch(sys.argv[1:]))
+    raise SystemExit(run())

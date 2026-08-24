@@ -970,6 +970,18 @@ cmd_port() {
 # team watch — o supervisor. Deixa rodando enquanto o time trabalha: ele lê os
 # logs, reconhece o jeito de cada fornecedor anunciar limite, põe quem estourou
 # de molho pelo tempo que o próprio anunciou e avisa no quadro.
+# Os utilitários em Python moram ao lado do comando, tanto no clone quanto na
+# instalação — um localizador só serve para todos.
+cmd_ferramenta() {
+  local nome="$1"; shift
+  local caminho=""
+  for c in "$TEAM_HOME/bin/$nome" "$REPO_ROOT/bin/$nome" "$(dirname "$SELF")/$nome"; do
+    [ -f "$c" ] && { caminho="$c"; break; }
+  done
+  [ -n "$caminho" ] || die "$nome não está instalado — rode ./install.sh"
+  exec python3 "$caminho" "$@"
+}
+
 cmd_watch() {
   local supervisor=""
   for c in "$TEAM_HOME/bin/team-watch" "$REPO_ROOT/bin/team-watch" "$(dirname "$SELF")/team-watch"; do
@@ -1041,6 +1053,8 @@ team — run the other AIs as a team, in parallel, and review what they bring ba
   team agents                      the roster and what each one is good at
   team hire [name]                 how to add someone who is not set up yet
   team models <agent>              which models that provider still serves
+  team models --refresh            re-check every provider and record what changed
+  team telemetry --show|--enable   optional, anonymous counters about what fails
   team quota [--clear [agent]]     who is out of quota, and until when
   team watch [--interval s]        supervise running agents: quota, stalls, errors
 
@@ -1064,9 +1078,30 @@ Options: --dir <path> --model <slug> --timeout <secs> --file <path> --here --bg
 USAGE
 }
 
+# Fornecedor aposenta modelo sem avisar. Em vez de exigir um agendador, o
+# próprio uso do time dispara a conferência — no máximo uma vez por dia, em
+# segundo plano, sem atrasar nada de quem está esperando.
+manutencao_em_segundo_plano() {
+  local marca="$STATE_DIR/.ultima-conferencia"
+  local agora idade
+  agora="$(now)"
+  if [ -f "$marca" ]; then
+    idade=$(( agora - $(cat "$marca" 2>/dev/null || echo 0) ))
+    [ "$idade" -lt 86400 ] && return 0
+  fi
+  printf '%s' "$agora" > "$marca"
+  local ferramenta=""
+  for c in "$TEAM_HOME/bin/team-models" "$REPO_ROOT/bin/team-models"; do
+    [ -f "$c" ] && { ferramenta="$c"; break; }
+  done
+  [ -n "$ferramenta" ] || return 0
+  ( python3 "$ferramenta" --quiet >/dev/null 2>&1 & ) >/dev/null 2>&1
+}
+
 main() {
   mkdir -p "$RUNS_DIR" "$WT_DIR" "$STATE_DIR" "$BOARD_DIR"
   [ ${#ADAPTER_DIRS[@]} -gt 0 ] || die "no adapters found. Reinstall with ./install.sh"
+  case "${1:-}" in doctor|sprint|run|panel) manutencao_em_segundo_plano ;; esac
   local cmd="${1:-help}"; shift || true
   case "$cmd" in
     doctor)      cmd_doctor "$@" ;;
@@ -1091,7 +1126,8 @@ main() {
     suggest)     cmd_suggest "$@" ;;
     watch)       cmd_watch "$@" ;;
     tidy)        cmd_tidy "$@" ;;
-    models)      cmd_models "$@" ;;
+    models)      if [ "${1:-}" = "--refresh" ]; then shift; cmd_ferramenta team-models "$@"; else cmd_models "$@"; fi ;;
+    telemetry)   cmd_ferramenta team-telemetry "$@" ;;
     port)        cmd_port "$@" ;;
     version|-V|--version) say "team $VERSION" ;;
     help|-h|--help) usage ;;

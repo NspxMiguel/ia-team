@@ -124,6 +124,44 @@ Two habits worth keeping:
 Agents also raise things on their own: anything they report starting with `TIP:`
 lands on the board for the others.
 
+## Cada agente tem os comandos dele
+
+Trocar de modelo, listar o que existe, continuar uma sessão — cada CLI faz do
+seu jeito, e chutar a flag errada queima uma execução inteira. A tabela real
+está em [docs/COMANDOS.md](docs/COMANDOS.md), levantada do `--help` de cada
+binário instalado nesta máquina. O resumo:
+
+- **nos agentes de API** (groq, openrouter, omniroute, ollama e companhia) o
+  modelo se troca pelo próprio `team`: `team run groq --model <slug>`, e
+  `team models <agente>` lista o que aquele fornecedor ainda serve;
+- **nas CLIs**, o `team` repassa o `--model` para a flag que aquela CLI aceita —
+  e cada uma tem a sua. Dentro de uma sessão interativa, a maioria usa `/model`;
+- **o modelo aposentado é diagnosticado**, não confundido com falta de cota:
+  quem some da lista do fornecedor volta com "modelo indisponível — rode: team
+  models <agente>".
+
+O gateway local merece nota à parte: `omniroute` aponta para o OmniRoute na
+própria máquina, com roteamento automático (`auto/best-coding`,
+`auto/best-fast`) sobre mais de cem modelos e sem chave nenhuma. É o caminho
+mais barato quando o trabalho é volume.
+
+## O time se mantém sozinho
+
+Fornecedor aposenta modelo sem avisar e plano grátis muda de regra — foi assim
+que a Groq derrubou a `llama-3.3-70b-versatile` e o OpenRouter tirou o DeepSeek
+da lista gratuita. Duas rotinas cuidam disso:
+
+```bash
+team models --refresh    # confere os modelos de cada fornecedor e anota o que mudou
+team telemetry --show    # o que vem falhando por aqui, por causa e por agente
+```
+
+A primeira roda sozinha a cada poucos dias: marca o modelo que sumiu, o que
+deixou de ser gratuito, sugere o substituto — e, se um modelo **voltar** a ser
+gratuito, anota isso também. A segunda é opcional e desligada por padrão;
+quando ligada, guarda só contadores por agente, modelo e causa de falha, sem
+nada identificável, para que o projeto saiba o que parou de funcionar.
+
 ## Watch them while they work
 
 Plans run out mid-sprint, and an agent that hit a wall keeps a run "running"

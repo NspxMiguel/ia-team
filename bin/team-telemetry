@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""
+team-telemetry — aggregate anonymized run data to understand team patterns.
+
+Collects only: adapter counts, model counts, failure causes (quota, rate limit,
+missing model, timeout, tool error, success), and average duration. Disabled by
+default and requires explicit consent in state/telemetry.json.
+
+PRIVACY BOUNDARY: This script reads only meta.json and log.txt from each run.
+It NEVER reads: brief.md (briefing), patch.diff (code changes), file names,
+directory paths, or any key material. The only identifying data it touches is
+the adapter and model names (which are already public in the shell environment).
+
+Each run directory entry yields one row to aggregate: its agent (adapter), model
+from meta.json, exit code to classify the failure reason, and duration calculated
+from filesystem timestamps. No project path, no problem statement, no code.
+
+Failure classification:
+  - "quota": Individual quota reached, usage limit hit
+  - "rate": Rate limit or rate-limited message in log
+  - "model": Model unavailable, unknown model, pay-only model
+  - "timeout": Timeout or deadline exceeded
+  - "tool": Unknown option, tool error, bad argument
+  - "ok": exit code 0 (success)
+"""
+
+import json
+import os
+import sys
+from pathlib import Path
+from collections import defaultdict
+from datetime import datetime
+
+def get_env_home():
+    """Resolve IA_TEAM_HOME, defaulting to ~/.ia-team."""
+    return os.environ.get('IA_TEAM_HOME', os.path.expanduser('~/.ia-team'))
+
+def get_state_path():
+    """Path to state/telemetry.json."""
+    return Path(get_env_home()) / 'state' / 'telemetry.json'
+
+def is_enabled():
+    """Return True if telemetry consent is enabled."""
+    path = get_state_path()
+    if not path.exists():
+        return False
+    try:
+        data = json.load(open(path))
+        return data.get('consent', False) is True
+    except (json.JSONDecodeError, IOError):
+        return False
+
+def set_consent(enabled):
+    """Write telemetry.json with consent flag."""
+    path = get_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {'consent': enabled, 'updated': datetime.now().isoformat()}
+    json.dump(data, open(path, 'w'), indent=2)
+
+def categorize_failure(exit_code, log_text):
+    """
+    Classify failure reason from exit code and log text.
+    Returns one of: 'ok', 'quota', 'rate', 'model', 'timeout', 'tool'.
+    """
+    if exit_code == 0 or exit_code == "0":
+        return 'ok'
+
+    log_lower = log_text.lower()
+
+    if any(x in log_lower for x in ['quota', 'usage limit', 'upgrade']):
+        return 'quota'
+
+    if 'rate' in log_lower or 'rate limited' in log_text:
+        return 'rate'
+
+    if any(x in log_lower for x in ['unavailable', 'unknown model', 'model not found', 'no such model']):
+        return 'model'
+
+    if any(x in log_lower for x in ['timeout', 'deadline']):
+        return 'timeout'
+
+    if any(x in log_lower for x in ['unknown option', 'tool error', 'bad argument']):
+        return 'tool'
+
+    # default: tool error for non-zero exit without explicit cause
+    return 'tool'
+
+def scan_runs():
+    """
+    Scan IA_TEAM_HOME/runs and aggregate telemetry.
+    Returns dict with aggregated counts and durations.
+    """
+    runs_dir = Path(get_env_home()) / 'runs'
+    if not runs_dir.exists():
+        return {'adapters': {}, 'models': {}, 'failures': {}, 'durations': {}}
+
+    agg = defaultdict(lambda: defaultdict(int))
+    durations = defaultdict(lambda: {'sum': 0, 'count': 0})
+
+    for run_path in sorted(runs_dir.iterdir()):
+        if not run_path.is_dir():
+            continue
+
+        meta_file = run_path / 'meta.json'
+        log_file = run_path / 'log.txt'
+
+        if not meta_file.exists():
+            continue
+
+        try:
+            meta = json.load(open(meta_file))
+        except (json.JSONDecodeError, IOError):
+            continue
+
+        agent = meta.get('agent', 'unknown')
+        model = meta.get('model', '')
+        exit_code = meta.get('exit', '0')
+
+        log_text = ''
+        if log_file.exists():
+            try:
+                log_text = open(log_file).read()
+            except IOError:
+                pass
+
+        failure = categorize_failure(exit_code, log_text)
+
+        # Aggregate: (adapter, model) -> count
+        agg['by_adapter_model'][(agent, model)] += 1
+
+        # Aggregate: (adapter, failure) -> count
+        agg['by_adapter_failure'][(agent, failure)] += 1
+
+        # Duration: calculate from directory timestamp (ctime or mtime)
+        try:
+            mtime = run_path.stat().st_mtime
+            duration = max(1, int(mtime - run_path.stat().st_birthtime)) if hasattr(run_path.stat(), 'st_birthtime') else 0
+            if duration > 0:
+                key = (agent, model)
+                durations[key]['sum'] += duration
+                durations[key]['count'] += 1
+        except (OSError, AttributeError):
+            pass
+
+    # Convert to final structure
+    result = {
+        'adapters': defaultdict(int),
+        'models': defaultdict(int),
+        'failures': defaultdict(int),
+        'durations': {}
+    }
+
+    for (adapter, model), count in agg['by_adapter_model'].items():
+        result['adapters'][adapter] += count
+        if model:
+            result['models'][model] += count
+
+    for (adapter, failure), count in agg['by_adapter_failure'].items():
+        key = f"{adapter}/{failure}"
+        result['failures'][key] = count
+
+    for key, data in durations.items():
+        if data['count'] > 0:
+            avg = data['sum'] // data['count']
+            result['durations'][f"{key[0]}/{key[1]}"] = avg
+
+    return {
+        'adapters': dict(result['adapters']),
+        'models': dict(result['models']),
+        'failures': dict(result['failures']),
+        'durations': result['durations']
+    }
+
+def show_summary(data):
+    """Print human-readable telemetry summary."""
+    print("=== Telemetry Summary ===\n")
+
+    print("Adapters:")
+    for adapter in sorted(data.get('adapters', {}).keys()):
+        count = data['adapters'][adapter]
+        print(f"  {adapter}: {count}")
+
+    print("\nModels:")
+    for model in sorted(data.get('models', {}).keys()):
+        if model:  # skip empty model names
+            count = data['models'][model]
+            print(f"  {model}: {count}")
+
+    print("\nFailures:")
+    for key in sorted(data.get('failures', {}).keys()):
+        count = data['failures'][key]
+        print(f"  {key}: {count}")
+
+    print("\nAverage duration (seconds):")
+    for key in sorted(data.get('durations', {}).keys()):
+        avg = data['durations'][key]
+        print(f"  {key}: {avg}s")
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: team-telemetry [--enable|--disable|--show|--export]")
+        sys.exit(1)
+
+    cmd = sys.argv[1]
+
+    if cmd == '--enable':
+        set_consent(True)
+        print("Telemetry enabled.")
+        return
+
+    if cmd == '--disable':
+        set_consent(False)
+        print("Telemetry disabled.")
+        return
+
+    if not is_enabled():
+        print("Telemetry is disabled. Run 'team-telemetry --enable' to opt in.")
+        sys.exit(1)
+
+    data = scan_runs()
+
+    if cmd == '--show':
+        show_summary(data)
+    elif cmd == '--export':
+        # Export as JSON suitable for sending (but don't send anywhere)
+        export = {
+            'timestamp': datetime.now().isoformat(),
+            'version': '1.0',
+            'summary': data
+        }
+        json.dump(export, sys.stdout, indent=2)
+    else:
+        print(f"Unknown command: {cmd}", file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()
