@@ -14,8 +14,8 @@ SKILL_DIR="$CLAUDE_DIR/skills/team"
 TEAM_HOME="${IA_TEAM_HOME:-$HOME/.ia-team}"
 BIN_DIR="$HOME/.local/bin"
 
-CLI_ADAPTERS="codex antigravity gemini opencode cursor claude"
-API_ADAPTERS="groq nvidia openrouter cerebras mistral together deepseek"
+CLI_ADAPTERS="antigravity claude codex cursor gemini opencode"
+API_ADAPTERS="cerebras dashscope deepinfra deepseek fireworks groq hyperbolic lmstudio mistral moonshot nvidia ollama omniroute openai openrouter sambanova together vllm xai zhipu"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }

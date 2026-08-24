@@ -399,6 +399,9 @@ cmd_agents() {
 }
 
 cmd_doctor() {
+  # doctor é o comando que a pessoa roda para saber o estado agora — inclusive
+  # logo depois de cadastrar uma chave. Cache aqui só serve para mentir.
+  rm -rf "$STATE_DIR/probe" 2>/dev/null || true
   local id st state detail ok=0 total=0
   printf '%s\n' "${B}team doctor${RST} (v$VERSION)"
   printf '  home: %s\n\n' "$TEAM_HOME"
@@ -998,6 +1001,38 @@ for m in sorted(x.get('id','') for x in dados.get('data', [])): print(' ', m)"
   fi
 }
 
+# team tidy — worktree é barata de criar e cara de esquecer: 84 delas passaram de
+# 1,6 GB na máquina do dono. Some o que já terminou e não tem patch pendente.
+cmd_tidy() {
+  local horas="${1:-2}" apagados=0 mantidos=0 espaco_antes espaco_depois
+  espaco_antes="$(du -sk "$WT_DIR" 2>/dev/null | cut -f1)"
+  local d status idade agora
+  agora="$(now)"
+  for d in $(ls -1 "$RUNS_DIR" 2>/dev/null); do
+    refresh_status "$d" 2>/dev/null || true
+    status="$(json_get "$RUNS_DIR/$d/meta.json" status)"
+    case "$status" in running) mantidos=$((mantidos+1)); continue ;; esac
+    local work; work="$(json_get "$RUNS_DIR/$d/meta.json" work)"
+    [ -n "$work" ] && [ -d "$work" ] || continue
+    idade=$(( (agora - $(stat -f %m "$RUNS_DIR/$d/meta.json" 2>/dev/null || stat -c %Y "$RUNS_DIR/$d/meta.json" 2>/dev/null || echo "$agora")) / 3600 ))
+    if [ "$idade" -lt "$horas" ]; then mantidos=$((mantidos+1)); continue; fi
+    local root branch
+    root="$(json_get "$RUNS_DIR/$d/meta.json" root)"
+    branch="$(json_get "$RUNS_DIR/$d/meta.json" branch)"
+    if [ -n "$root" ] && [ -d "$root" ]; then
+      git -C "$root" worktree remove --force "$work" >/dev/null 2>&1 || rm -rf "$work"
+      [ -n "$branch" ] && git -C "$root" branch -D "$branch" >/dev/null 2>&1 || true
+    else
+      rm -rf "$work"
+    fi
+    apagados=$((apagados+1))
+  done
+  espaco_depois="$(du -sk "$WT_DIR" 2>/dev/null | cut -f1)"
+  local liberado=$(( (${espaco_antes:-0} - ${espaco_depois:-0}) / 1024 ))
+  say "${GRN}$apagados${RST} worktrees removidas, ${DIM}$mantidos mantidas${RST} (o patch continua em runs/, só a cópia de trabalho sai)"
+  say "${liberado} MB liberados"
+}
+
 usage() {
   cat <<'USAGE'
 team — run the other AIs as a team, in parallel, and review what they bring back
@@ -1021,6 +1056,7 @@ team — run the other AIs as a team, in parallel, and review what they bring ba
   team crosscheck <id> [--by x]    have another agent review a patch
 
   team runs [n] | show <id> | diff <id> | apply <id> | drop <id> | wait <id>
+  team tidy [horas]                apaga worktrees de runs terminados (padrão: 2h)
   team suggest [--force|--mute]    offer to bring more AIs in (asked once)
   team port [--global]             teach Codex/Gemini/opencode to use the team too
 
@@ -1054,6 +1090,7 @@ main() {
     wait)        [ $# -ge 1 ] || die "usage: team wait <id>"; wait_run "$1"; cmd_show "$1" ;;
     suggest)     cmd_suggest "$@" ;;
     watch)       cmd_watch "$@" ;;
+    tidy)        cmd_tidy "$@" ;;
     models)      cmd_models "$@" ;;
     port)        cmd_port "$@" ;;
     version|-V|--version) say "team $VERSION" ;;

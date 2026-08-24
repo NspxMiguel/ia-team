@@ -9,8 +9,8 @@ ADAPTER_KEY_ENV="OPENROUTER_API_KEY"
 
 CLOUD_BASE_URL="https://openrouter.ai/api/v1"
 CLOUD_KEY_ENV="OPENROUTER_API_KEY"
-CLOUD_MODEL="deepseek/deepseek-chat-v3.1:free"
-CLOUD_ASK_MODEL="meta-llama/llama-3.3-70b-instruct:free"
+CLOUD_MODEL="z-ai/glm-5.2:free"
+CLOUD_ASK_MODEL="nvidia/nemotron-3-super-120b-a12b:free"
 
 . "$TEAM_LIB/cloud.sh"
 
