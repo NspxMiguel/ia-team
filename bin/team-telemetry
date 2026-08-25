@@ -214,8 +214,10 @@ def main():
         return
 
     if not is_enabled():
+        # Estar desligada é o estado normal e escolhido, não um erro: sair com
+        # código de falha faria qualquer script achar que a ferramenta quebrou.
         print("Telemetry is disabled. Run 'team-telemetry --enable' to opt in.")
-        sys.exit(1)
+        return
 
     data = scan_runs()
 

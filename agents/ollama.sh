@@ -4,7 +4,7 @@ ADAPTER_LABEL="Ollama (local)"
 ADAPTER_KIND="cloud"
 ADAPTER_BIN="python3"
 ADAPTER_TAGS="local, no key required, completely private"
-ADAPTER_INSTALL="brew install ollama, then: ollama serve (in another terminal)"
+ADAPTER_INSTALL="servidor no ar, mas sem modelo baixado. Baixe um antes de usar: ollama pull qwen2.5-coder (ou o de sua preferência) — o adaptador usa o primeiro instalado."
 ADAPTER_KEY_ENV=""
 
 CLOUD_BASE_URL="http://localhost:11434/v1"
