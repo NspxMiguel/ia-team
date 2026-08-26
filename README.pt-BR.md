@@ -123,8 +123,9 @@ worktree, `--bg` para disparar e continuar.
    mensagem endereçada àquele agente.
 3. O agente roda headless com prazo. Em `~/.ia-team/runs/<id>` ficam
    `brief.md`, `report.md`, `log.txt`, `patch.diff` e `meta.json`.
-4. O relatório vai para o quadro, e o que o agente marcou com `TIP:` chega aos
-   outros.
+4. O relatório vai para o quadro se a execução terminou — o que quebrou fica
+   no log, em vez de virar recado do time —, e o que o agente marcou com
+   `TIP:` chega aos outros.
 
 Nenhum agente commita nem dá push — e se um commitar dentro da própria worktree
 mesmo assim, o patch continua sendo capturado, porque o diff é tirado contra o

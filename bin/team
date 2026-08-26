@@ -6,6 +6,17 @@
 # No agent commits, no agent pushes.
 set -euo pipefail
 
+# cut, tr, grep e o CLI de cada agente contam caractere ou byte conforme o
+# locale, e uma sessão sem LANG cai no C, onde tudo é byte. Escolhemos um UTF-8
+# que exista nesta máquina; se o ambiente já traz um, ele manda.
+case "${LC_ALL:-${LANG:-}}" in
+  *UTF-8|*utf-8|*UTF8|*utf8) ;;
+  *) for _loc in C.UTF-8 en_US.UTF-8; do
+       if locale -a 2>/dev/null | grep -qxi "$_loc"; then export LC_ALL="$_loc" LANG="$_loc"; break; fi
+     done
+     unset _loc ;;
+esac
+
 VERSION="0.2.0"
 TEAM_HOME="${IA_TEAM_HOME:-$HOME/.ia-team}"
 RUNS_DIR="$TEAM_HOME/runs"
@@ -97,6 +108,24 @@ human_time() {
   elif [ "$s" -ge 60 ]; then printf '%dm' $((s/60)); else printf '%ds' "$s"; fi
 }
 slugify() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//'; }
+
+# Corta texto em N caracteres, nunca em N bytes. `cut -c` e `head -c` contam
+# byte na maior parte das máquinas (o cut do GNU conta byte sempre), e cortar no
+# byte 600 no meio de um "ç" grava meia letra. Meia letra é UTF-8 inválido: o
+# Codex recusa o briefing inteiro — "input is not valid UTF-8" — e o resto do
+# time engole o lixo calado, que é pior.
+clip() { # clip <n>  — texto pela entrada padrão
+  python3 -c 'import sys
+sys.stdout.write(sys.stdin.buffer.read().decode("utf-8", "ignore")[:int(sys.argv[1])])' "$1"
+}
+
+# A última peneira antes de o briefing sair. Mural escrito por uma versão antiga
+# e anexo em outra codificação passam por aqui e perdem o byte inválido, em vez
+# de derrubar a execução do outro lado.
+utf8_clean() {
+  python3 -c 'import sys
+sys.stdout.buffer.write(sys.stdin.buffer.read().decode("utf-8", "ignore").encode("utf-8"))'
+}
 
 run_limited() { # run_limited <seconds> <logfile> <command...>
   local secs="$1" log="$2"; shift 2
@@ -352,7 +381,7 @@ board_file() {
 }
 board_add() { # board_add <dir> <author> <text> [to]
   local f line; f="$(board_file "$1")"
-  line="$(printf '%s' "$3" | tr '\n' ' ' | cut -c1-600)"
+  line="$(printf '%s' "$3" | tr '\n' ' ' | clip 600)"
   [ -n "$line" ] || return 0
   # The same note twice in a row is noise, not news.
   if [ -s "$f" ] && grep -qF -- "$line" <(tail -6 "$f"); then return 0; fi
@@ -411,7 +440,7 @@ write_brief() { # write_brief <out> <mode> <workdir> <boarddir> <agent> <prompt>
       cat "$f"
       printf '\n```\n'
     done
-  } >"$out"
+  } | utf8_clean >"$out"
 }
 
 # Pulls the TIP: lines out of a report and puts them on the wall.
@@ -694,7 +723,11 @@ start_run() {
     detect_quota "$agent" "$d/log.txt" "$rc" >/dev/null 2>&1 || true
     detect_poupanca "$agent" "$d/log.txt" >/dev/null 2>&1 || true
     json_meta "$d/meta.json" status "$([ "$rc" -eq 0 ] && echo done || echo failed)" exit "$rc"
-    board_add "$dir" "$agent" "$(tail -8 "$d/report.md" 2>/dev/null | tr '\n' ' ' | cut -c1-400)"
+    # Só quem terminou deixa recado no mural. Execução que quebrou escrevia a
+    # própria mensagem de erro lá, e o erro voltava dentro do briefing de todo
+    # mundo como se fosse notícia do time — foi assim que um UTF-8 inválido se
+    # espalhou por dias. O que quebrou fica no log, onde `team show` acha.
+    [ "$rc" -eq 0 ] && board_add "$dir" "$agent" "$(tail -8 "$d/report.md" 2>/dev/null | tr '\n' ' ' | clip 400)"
     harvest_tips "$dir" "$agent" "$d/report.md"
   ) >/dev/null 2>&1 &
   json_meta "$d/meta.json" pid "$!"
@@ -772,7 +805,7 @@ cmd_sprint() {
     used="$used $agent"
     id="$(start_run "$agent" "$DIR" "$task" "$TIMEOUT" "$PLACE" "$MODEL")"
     ids+=("$id"); names+=("$agent")
-    say "  ${GRN}→${RST} ${B}$agent${RST}: $(printf '%s' "$task" | cut -c1-70)"
+    say "  ${GRN}→${RST} ${B}$agent${RST}: $(printf '%s' "$task" | clip 70)"
   done
   say ""
   say "${B}sprint started${RST} — ${#ids[@]} tasks in parallel"
@@ -810,7 +843,7 @@ cmd_sprint() {
 "
     case "$status" in
       done) printf '  %s✓%s %-12s %s   %steam show %s%s\n' "$GRN" "$RST" "$agent2" \
-              "$(printf '%s' "$files" | tr '\n' ' ' | cut -c1-46)" "$DIM" "$id" "$RST" ;;
+              "$(printf '%s' "$files" | tr '\n' ' ' | clip 46)" "$DIM" "$id" "$RST" ;;
       *)    printf '  %s✗%s %-12s %s   %steam show %s%s\n' "$RED" "$RST" "$agent2" "$status" "$DIM" "$id" "$RST" ;;
     esac
   done
@@ -840,7 +873,7 @@ cmd_standup() {
     prompt="$(json_get "$RUNS_DIR/$d/meta.json" prompt)"
     started="$(basename "$(json_get "$RUNS_DIR/$d/meta.json" dir)")"
     printf '  %s…%s %-12s %s%-16s%s %s\n' "$YEL" "$RST" "$agent" "$DIM" "$started" "$RST" \
-      "$(printf '%s' "$prompt" | tr -s ' ' | cut -c1-52)"
+      "$(printf '%s' "$prompt" | tr -s ' ' | clip 52)"
   done
   [ "$any" -eq 0 ] && printf '  nobody is working right now\n'
   return 0
@@ -892,7 +925,7 @@ cmd_crosscheck() { # team crosscheck <id> [--by agent]
   set -e
   detect_quota "$reviewer" "$out/answer.md" "$rc" || true
   cat "$out/answer.md"
-  board_add "$DIR" "$reviewer" "reviewed $author's patch: $(head -c 300 "$out/answer.md" | tr '\n' ' ')" "$author"
+  board_add "$DIR" "$reviewer" "reviewed $author's patch: $(tr '\n' ' ' <"$out/answer.md" | clip 300)" "$author"
 }
 
 

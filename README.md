@@ -121,8 +121,9 @@ worktree, `--bg` to start and keep working.
    addressed to that agent.
 3. The agent runs headless under a timeout. `~/.ia-team/runs/<id>` keeps
    `brief.md`, `report.md`, `log.txt`, `patch.diff` and `meta.json`.
-4. The report goes on the board, and anything the agent flagged with `TIP:`
-   reaches the rest of the team.
+4. The report goes on the board when the run finished — a run that crashed
+   keeps its output in the log instead of posting the error as team news —
+   and anything the agent flagged with `TIP:` reaches the rest of the team.
 
 Nothing is committed or pushed by an agent — and if one commits inside its own
 worktree anyway, the patch is still captured, because the diff is taken against

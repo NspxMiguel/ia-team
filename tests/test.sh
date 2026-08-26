@@ -149,6 +149,34 @@ ID4="$(ls -1t "$IA_TEAM_HOME/runs" | head -1)"
 check "the message is in their brief"  "grep -q 'start with the header' '$IA_TEAM_HOME/runs/$ID4/brief.md'"
 "$TEAM_ISOLATED" drop "$ID4" >/dev/null 2>&1
 
+# Uma nota longa em português é cortada em N caracteres, não em N bytes. Cortada
+# em byte, ela deixa meia letra no mural, e o Codex recusa o briefing inteiro
+# com "input is not valid UTF-8" — dois sprints inteiros morreram assim.
+LONGA="$(python3 -c "
+base = 'nota de contrato para a equipe '
+s = ''
+while len(s.encode()) < 599: s += base
+print(s.encode()[:599].decode() + 'ção do modulo')")"
+"$TEAM_ISOLATED" note lead --dir "$REPO" "$LONGA" >/dev/null 2>&1
+BOARD="$(ls -1 "$IA_TEAM_HOME/boards"/*.md 2>/dev/null | head -1)"
+check "nota acentuada não parte o mural em UTF-8" \
+  "python3 -c \"open('$BOARD','rb').read().decode('utf-8')\""
+"$TEAM_ISOLATED" run fake --dir "$REPO" "tarefa com acentuação" >/dev/null 2>&1
+ID5="$(ls -1t "$IA_TEAM_HOME/runs" | head -1)"
+check "o briefing sai em UTF-8 válido" \
+  "python3 -c \"open('$IA_TEAM_HOME/runs/$ID5/brief.md','rb').read().decode('utf-8')\""
+# E se o mural já estiver quebrado por uma versão antiga, o briefing ainda sai limpo.
+python3 -c "
+import sys
+f = '$BOARD'
+open(f, 'ab').write('- [01/01 00:00] **velho**: recado de uma versao antiga, cortado no meio de um c'.encode() + b'\xc3\n')"
+"$TEAM_ISOLATED" run fake --dir "$REPO" "outra tarefa" >/dev/null 2>&1
+ID6="$(ls -1t "$IA_TEAM_HOME/runs" | head -1)"
+check "mural quebrado não contamina o briefing" \
+  "python3 -c \"open('$IA_TEAM_HOME/runs/$ID6/brief.md','rb').read().decode('utf-8')\""
+"$TEAM_ISOLATED" drop "$ID5" >/dev/null 2>&1
+"$TEAM_ISOLATED" drop "$ID6" >/dev/null 2>&1
+
 printf '%s\n' "— sprint"
 OUT="$("$TEAM_ISOLATED" sprint --dir "$REPO" "fake: task one" "committer: task two" 2>&1)"
 case "$OUT" in *"2 tasks in parallel"*) ok "sprint runs both";; *) bad "sprint runs both" "$OUT";; esac
