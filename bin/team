@@ -864,7 +864,11 @@ cmd_sprint() {
 cmd_standup() {
   local d id status agent prompt started any=0
   printf '%s\n' "${B}standup${RST}"
-  for d in $(ls -1t "$RUNS_DIR" 2>/dev/null | head -30); do
+  local aqui_su; aqui_su="$(git_root "$PWD" 2>/dev/null || printf '%s' "$PWD")"
+  for d in $(ls -1t "$RUNS_DIR" 2>/dev/null | head -40); do
+    local dono_su; dono_su="$(json_get "$RUNS_DIR/$d/meta.json" root)"
+    [ -z "$dono_su" ] && dono_su="$(json_get "$RUNS_DIR/$d/meta.json" dir)"
+    [ "${TEAM_STANDUP_TUDO:-0}" = "1" ] || [ "$dono_su" = "$aqui_su" ] || continue
     refresh_status "$d"
     status="$(json_get "$RUNS_DIR/$d/meta.json" status)"
     [ "$status" = "running" ] || continue
@@ -945,8 +949,19 @@ refresh_status() { # refresh_status <run-id>
 
 cmd_runs() {
   [ -d "$RUNS_DIR" ] || { say "no runs yet"; return 0; }
+  # Duas pessoas (ou duas sessões) usando o time ao mesmo tempo veem a mesma
+  # pasta de execuções. Sem filtrar por projeto, uma lê o trabalho da outra —
+  # e chega a aplicar o patch do projeto errado, o que já aconteceu aqui.
+  local tudo=0
+  case "${1:-}" in --todos|--all) tudo=1; shift ;; esac
+  local aqui; aqui="$(git_root "$PWD" 2>/dev/null || printf '%s' "$PWD")"
   local d status agent files
-  for d in $(ls -1t "$RUNS_DIR" 2>/dev/null | head -"${1:-20}"); do
+  for d in $(ls -1t "$RUNS_DIR" 2>/dev/null | head -60); do
+    if [ "$tudo" -eq 0 ]; then
+      local dono; dono="$(json_get "$RUNS_DIR/$d/meta.json" root)"
+      [ -z "$dono" ] && dono="$(json_get "$RUNS_DIR/$d/meta.json" dir)"
+      [ "$dono" = "$aqui" ] || continue
+    fi
     refresh_status "$d"
     status="$(json_get "$RUNS_DIR/$d/meta.json" status)"
     agent="$(json_get "$RUNS_DIR/$d/meta.json" agent)"
@@ -984,9 +999,18 @@ cmd_diff()  { local d="$RUNS_DIR/$1"; [ -s "$d/patch.diff" ] || die "run $1 prod
 
 cmd_apply() {
   local id="$1" d="$RUNS_DIR/$1"
+  local forcar=0
+  case "${2:-}" in --forcar|--force) forcar=1 ;; esac
   [ -s "$d/patch.diff" ] || die "run $id produced no patch"
   local root; root="$(json_get "$d/meta.json" root)"
   [ -n "$root" ] || die "run $id has no repository recorded"
+  # O patch pertence ao projeto onde foi gerado. Aplicá-lo em outro é como
+  # entregar o trabalho de alguém na mesa errada — e some sem aviso no diff.
+  local aqui; aqui="$(git_root "$PWD" 2>/dev/null || printf '%s' "$PWD")"
+  if [ "$forcar" -eq 0 ] && [ -n "$aqui" ] && [ "$root" != "$aqui" ]; then
+    warn "esse patch é do projeto $(basename "$root"), e você está em $(basename "$aqui")"
+    die "se é isso mesmo: team apply $id --forcar"
+  fi
   git -C "$root" apply --3way "$d/patch.diff" \
     && say "${GRN}applied${RST} $id into $root — review with: git -C $root diff" \
     || die "the patch did not apply cleanly. Inspect it with: team diff $id"
@@ -1186,7 +1210,7 @@ team — run the other AIs as a team, in parallel, and review what they bring ba
   team relay <from> <to> "text"    send one agent a message
   team crosscheck <id> [--by x]    have another agent review a patch
 
-  team runs [n] | show <id> | diff <id> | apply <id> | drop <id> | wait <id>
+  team runs [--todos] | show <id> | diff <id> | apply <id> [--forcar] | drop <id>
   team tidy [horas]                apaga worktrees de runs terminados (padrão: 2h)
   team suggest [--force|--mute]    offer to bring more AIs in (asked once)
   team port [--global]             teach Codex/Gemini/opencode to use the team too

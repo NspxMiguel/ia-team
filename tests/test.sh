@@ -227,6 +227,20 @@ check "--com-claude usa o claude mesmo assim" "[ \"\$(python3 -c \"import json;p
 "$TEAM_ISOLATED" poupanca off >/dev/null 2>&1
 check "poupança desliga"                 "! $TEAM_ISOLATED poupanca | grep -q LIGADA"
 
+printf '%s\n' "— dois projetos ao mesmo tempo"
+OUTRO="$TMP/outro"; mkdir -p "$OUTRO"; cd "$OUTRO"; git init -q .
+printf 'z\n' > z.txt; git add -A; git -c user.email=t@t -c user.name=t commit -qm inicio
+cd "$REPO"
+"$TEAM_ISOLATED" run fake --dir "$REPO" "tarefa do primeiro projeto" >/dev/null 2>&1
+IDP="$(ls -1t "$IA_TEAM_HOME/runs" | head -1)"
+cd "$OUTRO"
+check "run do outro projeto não aparece aqui" "! $TEAM_ISOLATED runs 20 | grep -q '$IDP'"
+check "aplicar patch de outro projeto é recusado" "! $TEAM_ISOLATED apply '$IDP'"
+check "com --forcar ainda dá para insistir" "$TEAM_ISOLATED apply '$IDP' --forcar || true"
+cd "$REPO"
+check "no projeto de origem ele aparece" "$TEAM_ISOLATED runs 20 | grep -q '$IDP'"
+"$TEAM_ISOLATED" drop "$IDP" >/dev/null 2>&1
+
 printf '%s\n' "— limits"
 cat > "$IA_TEAM_HOME/agents/slow.sh" <<'ADAPTER'
 ADAPTER_ID="slow"; ADAPTER_LABEL="Slow agent"; ADAPTER_BIN="true"; ADAPTER_TAGS="testing"; ADAPTER_INSTALL="-"
