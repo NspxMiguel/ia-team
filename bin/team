@@ -104,7 +104,10 @@ now_id()   { printf '%s-%s' "$1" "$(date +%Y%m%d-%H%M%S)-$RANDOM"; }
 git_root() { git -C "$1" rev-parse --show-toplevel 2>/dev/null; }
 human_time() {
   local s="$1"
-  if [ "$s" -ge 3600 ]; then printf '%dh%02dm' $((s/3600)) $(((s%3600)/60));
+  # Dias existem por causa do provedor que só atende pagando: "720h00m" é a
+  # mesma informação que "30d" e ninguém lê a primeira.
+  if [ "$s" -ge 86400 ]; then printf '%dd%02dh' $((s/86400)) $(((s%86400)/3600));
+  elif [ "$s" -ge 3600 ]; then printf '%dh%02dm' $((s/3600)) $(((s%3600)/60));
   elif [ "$s" -ge 60 ]; then printf '%dm' $((s/60)); else printf '%ds' "$s"; fi
 }
 slugify() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//'; }
@@ -262,6 +265,11 @@ PY
     # cliente que a fixava passou a levar 404 em cada chamada.
     *"[modelo]"*|*"does not exist"*|*"model_not_found"*|*"decommissioned"*|*"has been deprecated"*)
       reason="modelo indisponível — rode: team models $agent"; secs=1800 ;;
+    # Cobrança não é cota: o 402 da Cerebras vinha com `"param":"quota"` e caía
+    # no caso genérico do [QUOTA], que arquiva cinco minutos. O provedor voltava
+    # ao rodízio, falhava, voltava — e o time gastava uma vaga por vez nele.
+    *"http 402"*|*"payment required"*|*"payment_required"*)
+      reason="exige pagamento — não é grátis"; secs=2592000 ;;
     *"rate_limit_exceeded"*|*"try again in"*|*"rate limit"*|*"too many requests"*|*"retry-after"*)
       reason="rate limited"; secs=300 ;;
     *"insufficient_quota"*|*"insufficient quota"*|*"out of credit"*|*"credit balance"*|\

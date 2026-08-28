@@ -288,7 +288,9 @@ def process_run(run_dir, quota_module, team_home, stale_minutes, quiet=False):
 
     result = quota_module.analisar(combined)
 
-    if result.get("tipo") in ("rate", "quota"):
+    # "pago" entra aqui de propósito: o efeito é o mesmo — sair da escala —
+    # e só o texto muda, porque a causa é outra (cobrança, não cota).
+    if result.get("tipo") in ("rate", "quota", "pago"):
         duration = result.get("espera", 300)
         reason = result.get("fonte", "Unknown")
         tipo = result.get("tipo")
@@ -301,10 +303,16 @@ def process_run(run_dir, quota_module, team_home, stale_minutes, quiet=False):
         if root_dir:
             board_id = compute_board_id(root_dir)
             board_dir = os.path.join(team_home, "boards")
-            msg = f"Benched for {duration}s ({tipo} limit from {provedor})"
+            msg = (f"Out of the roster: {provedor} requires payment"
+                   if tipo == "pago"
+                   else f"Benched for {duration}s ({tipo} limit from {provedor})")
             write_to_board(board_dir, board_id, agent, msg)
 
-        issues.append(("quota" if tipo == "quota" else "rate", f"{tipo} limit: {reason}"))
+        if tipo == "pago":
+            issues.append(("pago", f"provider requires payment: {reason}"))
+        else:
+            issues.append(("quota" if tipo == "quota" else "rate",
+                           f"{tipo} limit: {reason}"))
     elif result.get("tipo") == "auth":
         source = result.get("fonte", "Unknown")
         issues.append(("auth", f"Authentication error: {source}"))
@@ -314,7 +322,7 @@ def process_run(run_dir, quota_module, team_home, stale_minutes, quiet=False):
 
     # Cancel run if process is dead or stale is confirmed (but not if quota/rate already handled)
     tipos = {tipo for tipo, _ in issues}
-    if tipos & {"process_dead", "stale"} and not (tipos & {"quota", "rate"}):
+    if tipos & {"process_dead", "stale"} and not (tipos & {"quota", "rate", "pago"}):
         cancel_run(run_dir, agent)
 
     if issues:

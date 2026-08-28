@@ -50,6 +50,14 @@ adapter_probe() { echo "ok|1.0"; }
 adapter_ask() { echo '[QUOTA] HTTP 429 rate_limit_exceeded, please try again in 900ms'; return 3; }
 adapter_run() { adapter_ask; }
 ADAPTER
+# One that only answers to paying customers: HTTP 402 with "param":"quota".
+cat > "$IA_TEAM_HOME/agents/paid.sh" <<'ADAPTER'
+ADAPTER_ID="paid"; ADAPTER_LABEL="Payment required (tests)"; ADAPTER_KIND="cloud"
+ADAPTER_BIN="true"; ADAPTER_TAGS="nothing"; ADAPTER_INSTALL="-"
+adapter_probe() { echo "ok|1.0"; }
+adapter_ask() { echo '[QUOTA] HTTP 402: {"message":"Payment required to access this resource. Visit your billing tab.","param":"quota","code":"payment_required"}'; return 3; }
+adapter_run() { adapter_ask; }
+ADAPTER
 cat > "$IA_TEAM_HOME/agents/broken.sh" <<'ADAPTER'
 ADAPTER_ID="broken"; ADAPTER_LABEL="Missing agent (tests)"; ADAPTER_BIN="nope-xyz"
 ADAPTER_TAGS="nothing"; ADAPTER_INSTALL="cannot be installed"
@@ -191,6 +199,10 @@ check "benched shows as cooldown"      "$TEAM_ISOLATED agents | grep limited | g
 check "work is handed to someone else" "$TEAM_ISOLATED run limited --dir $REPO 'x' 2>&1 | grep -q 'handing this to'"
 "$TEAM_ISOLATED" drop "$(ls -1t "$IA_TEAM_HOME/runs" | head -1)" >/dev/null 2>&1
 check "quota can be cleared"           "$TEAM_ISOLATED quota --clear limited && $TEAM_ISOLATED quota | grep -q 'quota left'"
+"$TEAM_ISOLATED" ask paid --dir "$REPO" "anything" >/dev/null 2>&1
+check "payment is not treated as quota"  "$TEAM_ISOLATED quota | grep paid | grep -q 'pagamento'"
+check "paid provider leaves the roster"  "$TEAM_ISOLATED quota | grep paid | grep -qE '[0-9]+d'"
+"$TEAM_ISOLATED" quota --clear paid >/dev/null 2>&1
 
 printf '%s\n' "— suggestion, said once"
 check "suggest speaks the first time"  "$TEAM_ISOLATED suggest | grep -q 'team is small'"

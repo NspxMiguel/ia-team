@@ -144,6 +144,27 @@ class AnalisarQuotaTest(unittest.TestCase):
     def test_codex_apostrofo_tipografico(self):
         self.assertEqual(quota.analisar("You’ve hit your usage limit")["tipo"], "quota")
 
+    def test_cerebras_402_e_cobranca_nao_cota(self):
+        """402 com `"param":"quota"` não pode virar bench de cinco minutos.
+
+        O provedor não volta sozinho: sem plano pago ele responde o mesmo 402
+        para sempre, e tratá-lo como cota devolvia a Cerebras ao rodízio a cada
+        cinco minutos — uma vaga do time gasta por vez, indefinidamente.
+        """
+        texto = ('[QUOTA] HTTP 402: {"message":"Payment required to access this '
+                 'resource. Visit your billing tab.","type":"payment_required_error"'
+                 ',"param":"quota","code":"payment_required"}')
+        resultado = quota.analisar(texto)
+        self.assertEqual(resultado["tipo"], "pago")
+        self.assertEqual(resultado["espera"], quota.ESPERA_PAGAMENTO)
+
+    def test_pagamento_nao_engole_cota_de_verdade(self):
+        """Um 429 comum continua sendo rate limit, não cobrança."""
+        self.assertEqual(quota.analisar("HTTP 429\nRetry-After: 30")["tipo"], "rate")
+        self.assertEqual(
+            quota.analisar("Individual quota reached. Resets in 159h20m58s")["tipo"],
+            "quota")
+
 
 if __name__ == "__main__":
     unittest.main()

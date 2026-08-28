@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 
 
 LIMITE_QUOTA = 60 * 60
+# Trinta dias: tempo de plano mudar, não de cota voltar.
+ESPERA_PAGAMENTO = 30 * 24 * 60 * 60
 
 _NUMERO = r"[0-9]+(?:[.,][0-9]+)?"
 _UNIDADE = (
@@ -44,6 +46,18 @@ _AUTENTICACAO = (
     re.compile(r"\b(?:unauthorized|unauthenticated|authentication_error)\b", re.IGNORECASE),
     re.compile(r"\b(?:invalid|incorrect|missing|expired)[ _-]*(?:api[ _-]*)?key\b", re.IGNORECASE),
     re.compile(r"\b(?:not signed in|login required|please (?:log|sign) in)\b", re.IGNORECASE),
+)
+
+# Pagar não é esperar. A Cerebras responde HTTP 402 "Payment required" e o
+# texto carrega `"param":"quota"`, então o marcador [QUOTA] do runner fazia o
+# supervisor arquivar cinco minutos e devolver o provedor ao rodízio — que
+# falhava de novo, para sempre. Um provedor que só atende pagando não volta
+# sozinho: ele sai da escala e diz por quê.
+_PAGAMENTO = (
+    re.compile(r"\bHTTP\s+402\b", re.IGNORECASE),
+    re.compile(r"\bpayment[ _-]*required\b", re.IGNORECASE),
+    re.compile(r"\b(?:add|enter) (?:a )?(?:credit card|payment method)\b", re.IGNORECASE),
+    re.compile(r"\bbilling\s+(?:tab|page|details) (?:to|and)\b", re.IGNORECASE),
 )
 
 # Os sinais de janela curta vêm antes dos apelos para fazer upgrade: vários
@@ -191,9 +205,17 @@ def analisar(texto):
 
     Uma espera conhecida decide entre limite transitório (menos de uma hora) e
     cota (uma hora ou mais). Sem espera, a terminologia do provedor decide.
+
+    ``pago`` vem antes de tudo: cobrança não é cota nem credencial errada, e
+    esperar não resolve nenhuma das duas.
     """
     if not isinstance(texto, str) or not texto:
         return _resultado()
+
+    pagamento = _primeiro(texto, _PAGAMENTO)
+    if pagamento:
+        return _resultado("pago", ESPERA_PAGAMENTO, pagamento.group(0),
+                          _provedor(texto))
 
     autenticacao = _primeiro(texto, _AUTENTICACAO)
     if autenticacao:
