@@ -139,10 +139,10 @@ class AnalisarQuotaTest(unittest.TestCase):
                  "(https://chatgpt.com/explore/pro), visit "
                  "https://chatgpt.com/codex/settings/usage to purchase more "
                  "credits or try again")
-        self.assertEqual(analisar(texto)["tipo"], "quota")
+        self.assertEqual(quota.analisar(texto)["tipo"], "quota")
 
     def test_codex_apostrofo_tipografico(self):
-        self.assertEqual(analisar("You\u2019ve hit your usage limit")["tipo"], "quota")
+        self.assertEqual(quota.analisar("You’ve hit your usage limit")["tipo"], "quota")
 
 
 if __name__ == "__main__":
