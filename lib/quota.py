@@ -60,7 +60,12 @@ _QUOTA = (
     re.compile(r"\bRESOURCE_EXHAUSTED\b", re.IGNORECASE),
     re.compile(r"\b(?:out of|no|insufficient)\s+credits?\b|\bcredit balance\b", re.IGNORECASE),
     re.compile(r"\b(?:daily|weekly|monthly|5-hour)\s+limit(?:\s+(?:reached|exceeded))?\b", re.IGNORECASE),
-    re.compile(r"\byou (?:have|'ve) hit your (?:usage |weekly |daily |monthly )?limit\b", re.IGNORECASE),
+    # "You've hit your usage limit" vem sem espaço antes do apóstrofo, e o
+    # apóstrofo pode ser reto ou tipográfico. Exigir "you 've" fazia o Codex
+    # sem cota passar por erro genérico — três falhas seguidas sem diagnóstico.
+    re.compile(r"\byou\s*(?:['\u2019]ve|have)?\s*hit your (?:usage |weekly |daily |monthly )?limit\b",
+               re.IGNORECASE),
+    re.compile(r"\bpurchase more credits\b|\bupgrade to pro\b", re.IGNORECASE),
     re.compile(r"\b(?:tokens?|requests?)\s+per\s+day\b|\bTPD\b|\bRPD\b", re.IGNORECASE),
     re.compile(r"\b(?:billing|spending)\s+(?:hard\s+)?limit\b", re.IGNORECASE),
     re.compile(r"\bupgrade your (?:subscription|plan)\b", re.IGNORECASE),

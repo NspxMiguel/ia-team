@@ -129,5 +129,21 @@ class AnalisarQuotaTest(unittest.TestCase):
         )
 
 
+    def test_codex_sem_cota(self):
+        """O Codex escreve "You've hit" sem espaço antes do apóstrofo.
+
+        Com o padrão antigo isso caía em erro genérico, e três execuções
+        seguidas foram registradas como falha em vez de falta de cota.
+        """
+        texto = ("ERROR: You've hit your usage limit. Upgrade to Pro "
+                 "(https://chatgpt.com/explore/pro), visit "
+                 "https://chatgpt.com/codex/settings/usage to purchase more "
+                 "credits or try again")
+        self.assertEqual(analisar(texto)["tipo"], "quota")
+
+    def test_codex_apostrofo_tipografico(self):
+        self.assertEqual(analisar("You\u2019ve hit your usage limit")["tipo"], "quota")
+
+
 if __name__ == "__main__":
     unittest.main()
