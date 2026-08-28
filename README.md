@@ -1,11 +1,23 @@
+<div align="center">
+
 # ia-team
 
-Put the other AIs on your machine to work as a team — in parallel, talking to
-each other — and review what they bring back before it touches your repository.
+**Put the other AIs on your machine to work as a team.**
 
-Claude Code (or whoever runs `team`) stays the lead: it splits the job, writes
-the briefs, and reads every diff. Each agent works in a throwaway git worktree,
-so nothing lands on your branch until a patch is applied on purpose.
+One lead agent splits the job, every teammate works in its own throwaway git
+worktree, and what comes back is a patch you read before it touches your branch.
+
+[![Measured](https://img.shields.io/badge/measured-2.9%C3%97_faster_%C2%B7_2.6%C3%97_cheaper-0a84ff)](docs/EQUIPE-VS-SOLO.md)
+[![Adapters](https://img.shields.io/badge/adapters-20%2B_CLIs_and_APIs-black)](#the-roster)
+[![Tests](https://img.shields.io/badge/tests-49_checks-3fb950)](#tests)
+[![Requires](https://img.shields.io/badge/requires-git_%2B_python3-lightgrey)](#install)
+[![License](https://img.shields.io/github/license/NspxMiguel/ia-team?color=lightgrey)](LICENSE)
+
+<img src="docs/img/cover.jpg" alt="ia-team: the install command and an example run" width="760">
+
+</div>
+
+---
 
 ```bash
 team sprint "antigravity: the landing page, dark, no framework" \
@@ -16,21 +28,22 @@ team sprint "antigravity: the landing page, dark, no framework" \
 
 Four agents, four worktrees, four patches — in the time the slowest one takes.
 
-## Vale a pena? Medido, não achismo
+## Is it worth it? Measured, not assumed
 
-Mesmas duas tarefas de dificuldade média, mesmo enunciado, duas arenas limpas —
-três agentes em paralelo contra um só:
+The same two medium-difficulty tasks, the same brief, two clean arenas — three
+agents in parallel against one working alone:
 
-| | Três IAs em paralelo | Um agente sozinho |
+| | Three AIs in parallel | One agent alone |
 | --- | --- | --- |
-| Tempo de parede | **105 s** | **301 s** |
-| Custo em dólar (Anthropic) | **US$ 0,47** | **US$ 1,22** |
-| Outros consumos | 22.842 tokens do plano Codex; Groq de graça | — |
-| Testes próprios passando | 17 | 14 |
+| Wall-clock time | **105 s** | **301 s** |
+| Cost in dollars (Anthropic) | **$0.47** | **$1.22** |
+| Other consumption | 22,842 tokens of the Codex plan; Groq for free | — |
+| Own tests passing | 17 | 14 |
 
-**2,9× mais rápido e 2,6× mais barato**, com a parte mecânica indo para um
-modelo gratuito. O caminho até esses números, o que eles não dizem, e quando
-*não* vale dividir estão em [docs/EQUIPE-VS-SOLO.md](docs/EQUIPE-VS-SOLO.md).
+**2.9× faster and 2.6× cheaper**, with the mechanical part going to a free
+model. How those numbers were produced, what they do not say, and when splitting
+the work is *not* worth it are in
+[docs/EQUIPE-VS-SOLO.md](docs/EQUIPE-VS-SOLO.md).
 
 ## Install
 
@@ -41,6 +54,44 @@ curl -fsSL https://raw.githubusercontent.com/NspxMiguel/ia-team/main/install.sh 
 Installs the `team` command in `~/.local/bin`, the adapters and the API runner
 in `~/.ia-team`, and a `team` skill for Claude Code in `~/.claude/skills/team`.
 Requires `git` and `python3`, nothing else.
+
+## What it looks like
+
+`team doctor` is the first thing to run. It says who is installed, who is signed
+in, and who is out of quota — the roster is whatever your machine already has:
+
+```console
+$ team doctor
+team doctor (v0.2.0)
+  home: /Users/you/.ia-team
+
+  ✓ antigravity  agy 1.1.22
+  ◔ cerebras     out of quota, back in 29d23h
+  ✓ claude       2.1.212 (Claude Code)
+  ◔ codex        out of quota, back in 5h31m
+  ✓ cursor       2026.08.25-3e8eec8 [cursor-grok-4.6-high]
+  ✓ gemini       gemini 0.56.0
+  ✓ groq         openai/gpt-oss-120b (key in the keychain)
+  ✓ opencode     1.18.14
+  ✓ openrouter   deepseek/deepseek-chat-v3.1:free (key in the keychain)
+  ! mistral      no MISTRAL_API_KEY — see: team hire mistral
+  · ollama       Ollama is running but has no model pulled
+```
+
+Then a sprint hands one task to each of them and returns one patch per task:
+
+```console
+$ team sprint "antigravity: the landing page, dark, no framework" \
+              "codex: the /api/links route following README.md" \
+              "groq: node:test tests for the four routes"
+
+  antigravity  worktree r-4f21  ✓ 96s   patch 3 files, +214 −0
+  codex        worktree r-4f22  ✓ 141s  patch 2 files, +96 −4
+  groq         worktree r-4f23  ✓ 38s   patch 1 file,  +130 −0
+
+  team diff r-4f22     # read it
+  team apply r-4f22    # then, and only then, it touches your branch
+```
 
 ## The roster
 
@@ -159,6 +210,33 @@ tests/test.sh
 patch capture (including from an agent that commits), the board, relays,
 sprints, quota benching and hand-off, the once-only suggestion, and porting.
 
+## What it does not do
+
+- **It does not supply models.** `team` drives CLIs and API keys you already
+  have. With nothing installed and no key, `team doctor` is an empty roster.
+- **It does not merge for you.** No agent commits, pushes, or touches your
+  branch. Applying a patch is always a command you type.
+- **It does not resolve two agents editing the same file.** Split the work by
+  files; `sprint` warns about the overlap but will not decide for you.
+- **It is not faster for a single small task.** Setting up a worktree and a
+  brief costs a few seconds — below that, run the agent yourself.
+- **Free tiers run out mid-job.** Benching and hand-off soften it, but a sprint
+  can still finish with one task undone. `team runs` shows which.
+- **Headless agents cannot ask questions.** A brief that is vague comes back as
+  a patch that is wrong, quickly.
+
+## Links
+
+- Project page: <https://www.nspx.dev/ia-team/>
+- Every command in detail: [docs/COMANDOS.md](docs/COMANDOS.md)
+- How the measurement was run: [docs/EQUIPE-VS-SOLO.md](docs/EQUIPE-VS-SOLO.md)
+
 ## License
 
-MIT.
+MIT — see [LICENSE](LICENSE).
+
+<div align="center">
+
+Made by [@NspxMiguel](https://github.com/NspxMiguel) · [nspx.dev](https://www.nspx.dev)
+
+</div>
