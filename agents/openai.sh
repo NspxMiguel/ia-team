@@ -14,6 +14,6 @@ CLOUD_ASK_MODEL="gpt-5.6"
 
 . "$TEAM_LIB/cloud.sh"
 
-adapter_probe() { cloud_probe "OPENAI_API_KEY" "gpt-5.6"; }
+adapter_probe() { cloud_probe "OPENAI_API_KEY"; }
 adapter_ask()   { cloud_ask "$1" "$2" "${3:-}"; }
 adapter_run()   { cloud_run "$1" "$2" "${3:-}"; }

@@ -14,6 +14,6 @@ CLOUD_ASK_MODEL="Qwen/Qwen3-Coder-480B-A35B-Instruct"
 
 . "$TEAM_LIB/cloud.sh"
 
-adapter_probe() { cloud_probe "DEEPINFRA_API_KEY" "Qwen/Qwen3-Coder-480B-A35B-Instruct"; }
+adapter_probe() { cloud_probe "DEEPINFRA_API_KEY"; }
 adapter_ask()   { cloud_ask "$1" "$2" "${3:-}"; }
 adapter_run()   { cloud_run "$1" "$2" "${3:-}"; }

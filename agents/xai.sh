@@ -14,6 +14,6 @@ CLOUD_ASK_MODEL="grok-4-fast-reasoning"
 
 . "$TEAM_LIB/cloud.sh"
 
-adapter_probe() { cloud_probe "XAI_API_KEY" "grok-4-fast-reasoning"; }
+adapter_probe() { cloud_probe "XAI_API_KEY"; }
 adapter_ask()   { cloud_ask "$1" "$2" "${3:-}"; }
 adapter_run()   { cloud_run "$1" "$2" "${3:-}"; }

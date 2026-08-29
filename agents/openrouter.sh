@@ -14,6 +14,6 @@ CLOUD_ASK_MODEL="nvidia/nemotron-3-super-120b-a12b:free"
 
 . "$TEAM_LIB/cloud.sh"
 
-adapter_probe() { cloud_probe "OPENROUTER_API_KEY" "deepseek/deepseek-chat-v3.1:free"; }
+adapter_probe() { cloud_probe "OPENROUTER_API_KEY"; }
 adapter_ask()   { cloud_ask "$1" "$2" "${3:-}"; }
 adapter_run()   { cloud_run "$1" "$2" "${3:-}"; }

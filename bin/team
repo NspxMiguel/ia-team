@@ -34,8 +34,20 @@ REPO_ROOT="$(cd "$SELF_DIR/.." && pwd)"
 ADAPTER_DIRS=()
 [ -d "$REPO_ROOT/agents" ] && ADAPTER_DIRS+=("$REPO_ROOT/agents")
 [ -d "$TEAM_HOME/agents" ] && ADAPTER_DIRS+=("$TEAM_HOME/agents")
-if [ -d "$TEAM_HOME/lib" ]; then TEAM_LIB="$TEAM_HOME/lib"; else TEAM_LIB="$REPO_ROOT/lib"; fi
-if [ -f "$TEAM_HOME/lib/port_install.py" ]; then TEAM_PORT_HELPER="$TEAM_HOME/lib/port_install.py"
+# Adaptador e biblioteca vêm do mesmo lugar. Antes o adaptador preferia o
+# repositório e a biblioteca preferia a instalação, então rodar ./bin/team num
+# checkout misturava as duas metades: um adaptador novo chamava uma função
+# antiga e o resultado saía errado sem erro nenhum — foi assim que um rótulo de
+# modelo apareceu vazio em vez de mostrar a mudança recém-feita.
+if [ -d "$REPO_ROOT/agents" ] && [ -d "$REPO_ROOT/lib" ]; then
+  TEAM_LIB="$REPO_ROOT/lib"
+elif [ -d "$TEAM_HOME/lib" ]; then
+  TEAM_LIB="$TEAM_HOME/lib"
+else
+  TEAM_LIB="$REPO_ROOT/lib"
+fi
+if [ -f "$TEAM_LIB/port_install.py" ]; then TEAM_PORT_HELPER="$TEAM_LIB/port_install.py"
+elif [ -f "$TEAM_HOME/lib/port_install.py" ]; then TEAM_PORT_HELPER="$TEAM_HOME/lib/port_install.py"
 else TEAM_PORT_HELPER="$REPO_ROOT/lib/port_install.py"; fi
 export TEAM_LIB TEAM_HOME TEAM_PORT_HELPER
 

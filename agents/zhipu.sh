@@ -14,6 +14,6 @@ CLOUD_ASK_MODEL="glm-4.6"
 
 . "$TEAM_LIB/cloud.sh"
 
-adapter_probe() { cloud_probe "ZHIPU_API_KEY" "glm-4.6"; }
+adapter_probe() { cloud_probe "ZHIPU_API_KEY"; }
 adapter_ask()   { cloud_ask "$1" "$2" "${3:-}"; }
 adapter_run()   { cloud_run "$1" "$2" "${3:-}"; }

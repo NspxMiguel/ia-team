@@ -14,6 +14,6 @@ CLOUD_ASK_MODEL="meta-llama/Llama-3.3-70B-Instruct-Turbo"
 
 . "$TEAM_LIB/cloud.sh"
 
-adapter_probe() { cloud_probe "TOGETHER_API_KEY" "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"; }
+adapter_probe() { cloud_probe "TOGETHER_API_KEY"; }
 adapter_ask()   { cloud_ask "$1" "$2" "${3:-}"; }
 adapter_run()   { cloud_run "$1" "$2" "${3:-}"; }

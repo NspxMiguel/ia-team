@@ -14,6 +14,6 @@ CLOUD_ASK_MODEL="meta/llama-3.3-70b-instruct"
 
 . "$TEAM_LIB/cloud.sh"
 
-adapter_probe() { cloud_probe "NVIDIA_API_KEY" "moonshotai/kimi-k2-thinking"; }
+adapter_probe() { cloud_probe "NVIDIA_API_KEY"; }
 adapter_ask()   { cloud_ask "$1" "$2" "${3:-}"; }
 adapter_run()   { cloud_run "$1" "$2" "${3:-}"; }

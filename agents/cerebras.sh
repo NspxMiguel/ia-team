@@ -14,6 +14,6 @@ CLOUD_ASK_MODEL="gemma-4-31b"
 
 . "$TEAM_LIB/cloud.sh"
 
-adapter_probe() { cloud_probe "CEREBRAS_API_KEY" "qwen-3-coder-480b"; }
+adapter_probe() { cloud_probe "CEREBRAS_API_KEY"; }
 adapter_ask()   { cloud_ask "$1" "$2" "${3:-}"; }
 adapter_run()   { cloud_run "$1" "$2" "${3:-}"; }

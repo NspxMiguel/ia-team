@@ -14,6 +14,6 @@ CLOUD_ASK_MODEL="qwen3-coder-plus"
 
 . "$TEAM_LIB/cloud.sh"
 
-adapter_probe() { cloud_probe "DASHSCOPE_API_KEY" "qwen3-coder-plus"; }
+adapter_probe() { cloud_probe "DASHSCOPE_API_KEY"; }
 adapter_ask()   { cloud_ask "$1" "$2" "${3:-}"; }
 adapter_run()   { cloud_run "$1" "$2" "${3:-}"; }

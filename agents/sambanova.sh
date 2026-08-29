@@ -14,6 +14,6 @@ CLOUD_ASK_MODEL="Meta-Llama-3.3-70B-Instruct"
 
 . "$TEAM_LIB/cloud.sh"
 
-adapter_probe() { cloud_probe "SAMBANOVA_API_KEY" "Meta-Llama-3.3-70B-Instruct"; }
+adapter_probe() { cloud_probe "SAMBANOVA_API_KEY"; }
 adapter_ask()   { cloud_ask "$1" "$2" "${3:-}"; }
 adapter_run()   { cloud_run "$1" "$2" "${3:-}"; }

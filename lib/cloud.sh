@@ -27,8 +27,13 @@ cloud_key_state() { # cloud_key_state <ENV_NAME> -> env|keychain|missing
   echo missing
 }
 
-cloud_probe() { # cloud_probe <ENV_NAME> <label>
-  local name="$1" label="$2"
+# O rótulo sai do próprio CLOUD_MODEL quando ninguém passa outro. Ele era
+# escrito à mão em cada adaptador, e duas cópias já tinham se soltado da
+# verdade: o openrouter anunciava um modelo que o fornecedor aposentou, e o
+# cerebras anunciava outro que não era o que ele usava. Nome repetido em dois
+# lugares é nome que vai divergir; o certo é não repetir.
+cloud_probe() { # cloud_probe <ENV_NAME> [label]
+  local name="$1" label="${2:-${CLOUD_MODEL:-}}"
   _cloud_runner >/dev/null || { echo "missing|the runner is not installed"; return; }
   case "$(cloud_key_state "$name")" in
     env)      echo "ok|$label (key in \$$name)" ;;
