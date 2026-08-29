@@ -76,7 +76,9 @@ probe() {
   local id="$1" left cache age
   left="$(quota_left "$id")"
   if [ "$left" -gt 0 ] 2>/dev/null; then
-    printf 'cooldown|out of quota, back in %s\n' "$(human_time "$left")"
+    local motivo
+    motivo="$(quota_reason "$id")"
+    printf 'cooldown|%s, back in %s\n' "${motivo:-out of quota}" "$(human_time "$left")"
     return
   fi
   cache="$STATE_DIR/probe/$id"
@@ -176,6 +178,21 @@ json_get() { python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get(
 # ------------------------------------------------------------------ quota ---
 # An agent that ran out of quota is not broken — it is off shift. We record when
 # it comes back so nobody keeps sending work into a wall.
+# O motivo do banco fica guardado e nao era mostrado: um provedor que exige
+# pagamento aparecia como "out of quota", que manda esperar por algo que nao
+# vai acontecer. Quem le a linha precisa saber se e esperar ou se e desistir.
+quota_reason() {
+  [ -s "$QUOTA_FILE" ] || return 0
+  python3 - "$QUOTA_FILE" "$1" <<'PYQ'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except ValueError:
+    raise SystemExit
+print((data.get(sys.argv[2]) or {}).get("reason", ""))
+PYQ
+}
+
 quota_left() { # seconds remaining, 0 when free
   [ -s "$QUOTA_FILE" ] || { echo 0; return; }
   python3 - "$QUOTA_FILE" "$1" <<'PY'
