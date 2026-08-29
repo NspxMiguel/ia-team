@@ -204,6 +204,15 @@ check "payment is not treated as quota"  "$TEAM_ISOLATED quota | grep paid | gre
 check "paid provider leaves the roster"  "$TEAM_ISOLATED quota | grep paid | grep -qE '[0-9]+d'"
 "$TEAM_ISOLATED" quota --clear paid >/dev/null 2>&1
 
+printf '%s\n' "— planopt"
+# A ponte tem que ser invisível quando o planopt não está instalado: o `team` é
+# público e quase ninguém que o baixa tem o outro projeto.
+check "roteia sem o planopt"       "PLANOPT_BIN=nao-existe-xyz $TEAM_ISOLATED run fake --dir $REPO 'x' >/dev/null 2>&1; PLANOPT_BIN=nao-existe-xyz $TEAM_ISOLATED runs | grep -q fake"
+"$TEAM_ISOLATED" drop "$(ls -1t "$IA_TEAM_HOME/runs" | head -1)" >/dev/null 2>&1
+check "doctor sem o planopt"       "PLANOPT_BIN=nao-existe-xyz $TEAM_ISOLATED doctor | grep -q 'ready to work'"
+check "--model explícito manda"    "PLANOPT_BIN=nao-existe-xyz $TEAM_ISOLATED run fake --dir $REPO --model meu-modelo 'x' >/dev/null 2>&1; grep -q meu-modelo $IA_TEAM_HOME/runs/*/meta.json"
+"$TEAM_ISOLATED" drop "$(ls -1t "$IA_TEAM_HOME/runs" | head -1)" >/dev/null 2>&1
+
 printf '%s\n' "— suggestion, said once"
 check "suggest speaks the first time"  "$TEAM_ISOLATED suggest | grep -q 'team is small'"
 check "suggest stays quiet after that" "! $TEAM_ISOLATED suggest"

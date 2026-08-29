@@ -48,8 +48,12 @@ _cloud_exec() { # _cloud_exec <mode> <dir> <brief> <model>
   [ -n "$model" ] || model="$CLOUD_MODEL"
   [ "$mode" = "ask" ] && [ -n "${CLOUD_ASK_MODEL:-}" ] && [ -z "${4:-}" ] && model="$CLOUD_ASK_MODEL"
 
+  # A fila de reserva chega por ambiente porque a assinatura do adaptador é
+  # contrato público: acrescentar um sétimo parâmetro posicional quebraria todo
+  # adaptador escrito por outra pessoa.
   local args=(/usr/bin/python3 "$runner"
     --base-url "$CLOUD_BASE_URL" --model "$model" --key-env "$CLOUD_KEY_ENV"
+    --modelos-reserva "${TEAM_MODELOS_RESERVA:-}"
     --dir "$dir" --brief "$brief" --mode "$mode"
     --timeout "${TEAM_AGENT_TIMEOUT:-900}")
 

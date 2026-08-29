@@ -24,6 +24,7 @@ WT_DIR="$TEAM_HOME/worktrees"
 STATE_DIR="$TEAM_HOME/state"
 BOARD_DIR="$TEAM_HOME/boards"
 QUOTA_FILE="$STATE_DIR/quota.json"
+MODELO_ESCOLHIDO=""
 SUGGEST_FILE="$STATE_DIR/suggest.json"
 
 SELF="${BASH_SOURCE[0]}"
@@ -50,6 +51,19 @@ if [ -f "$TEAM_LIB/port_install.py" ]; then TEAM_PORT_HELPER="$TEAM_LIB/port_ins
 elif [ -f "$TEAM_HOME/lib/port_install.py" ]; then TEAM_PORT_HELPER="$TEAM_HOME/lib/port_install.py"
 else TEAM_PORT_HELPER="$REPO_ROOT/lib/port_install.py"; fi
 export TEAM_LIB TEAM_HOME TEAM_PORT_HELPER
+
+# A ponte para o claude-plan-optimizer. Ela é opcional de ponta a ponta: sem o
+# planopt instalado toda função dali devolve vazio, e o `team` roteia como antes.
+# shellcheck source=lib/planopt.sh
+[ -f "$TEAM_LIB/planopt.sh" ] && . "$TEAM_LIB/planopt.sh"
+planopt_existe() { command -v "${PLANOPT_BIN:-planopt}" >/dev/null 2>&1; }
+if ! declare -F planopt_faixa >/dev/null 2>&1; then
+  planopt_faixa() { return 0; }
+  planopt_modelo() { return 0; }
+  planopt_alternativas() { return 0; }
+  planopt_esforco() { return 0; }
+  planopt_peso_carteira() { echo 0; }
+fi
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   B=$'\033[1m'; DIM=$'\033[2m'; RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; CYN=$'\033[36m'; RST=$'\033[0m'
@@ -490,8 +504,34 @@ harvest_tips() { # harvest_tips <dir> <agent> <file>
 
 # --------------------------------------------------------------- routing ----
 # Who should get this task? Tags first, then whoever is free.
+# O modelo a usar quando ninguém passou --model: o que o planopt indica para
+# aquele agente naquela faixa. O --model explícito sempre ganha — quem digitou
+# o nome do modelo decidiu, e adivinhar por cima disso seria desobediência.
+# Arma duas coisas: MODELO_ESCOLHIDO e TEAM_MODELOS_RESERVA, a fila daquela
+# faixa. Escreve em variável em vez de imprimir de propósito — chamada dentro de
+# `$( )` roda em subshell, e um `export` ali dentro morre com ele: a reserva
+# seria montada e jogada fora sem ninguém perceber.
+#
+# O --model explícito ganha de tudo e não leva reserva: quem digitou o nome do
+# modelo escolheu aquele, e trocar por outro seria desobediência.
+arma_modelo() { # arma_modelo <agente> <texto-da-tarefa> <model-explicito>
+  MODELO_ESCOLHIDO=""
+  export TEAM_MODELOS_RESERVA=""
+  if [ -n "${3:-}" ]; then MODELO_ESCOLHIDO="$3"; return 0; fi
+  planopt_existe || return 0
+  local faixa; faixa="$(planopt_faixa "$2")"
+  [ -n "$faixa" ] || return 0
+  MODELO_ESCOLHIDO="$(planopt_modelo "$1" "$faixa")"
+  export TEAM_MODELOS_RESERVA="$(planopt_alternativas "$1" "$faixa")"
+}
+
 pick_agent() { # pick_agent <task-text> [exclude...]
-  local task; task="$(printf '%s' "$1" | tr 'A-Z' 'a-z')"; shift
+  local task; task="$(printf '%s' "$1" | tr 'A-Z' 'a-z')"
+  # A faixa de custo, quando o planopt está instalado. O roteamento por assunto
+  # continua mandando em quem entende do tema; a faixa entra por cima dele, para
+  # que mudar uma cor não caia no mesmo agente que refazer uma arquitetura.
+  local faixa; faixa="$(planopt_faixa "$1")"
+  shift
   local excluded=" $* " best="" best_score=-1 a score tags
   for a in $(ready_agents); do
     case "$excluded" in *" $a "*) continue ;; esac
@@ -510,6 +550,7 @@ pick_agent() { # pick_agent <task-text> [exclude...]
       *api*|*backend*|*server*|*banco*|*database*|*refactor*)
         case "$a" in codex|nvidia|deepseek) score=$((score + 5)) ;; esac ;;
     esac
+    score=$((score + $(planopt_peso_carteira "$a" "$faixa")))
     if [ "$score" -gt "$best_score" ]; then best="$a"; best_score="$score"; fi
   done
   if [ -n "$best" ]; then printf '%s\n' "$best"; fi
@@ -661,9 +702,11 @@ cmd_ask() {
   json_meta "$d/meta.json" id "$id" agent "$agent" mode ask dir "$DIR" status running prompt "$prompt"
 
   local file; file="$(adapter_file "$agent")" rc=0
+  arma_modelo "$agent" "$prompt" "$MODEL"
   set +e
   run_limited "$TIMEOUT" "$d/answer.md" \
-    bash -c 'set +u; . "$1" >/dev/null 2>&1; adapter_ask "$2" "$3" "$4"' _ "$file" "$DIR" "$d/brief.md" "$MODEL"
+    bash -c 'set +u; . "$1" >/dev/null 2>&1; adapter_ask "$2" "$3" "$4"' _ "$file" "$DIR" "$d/brief.md" \
+      "$MODELO_ESCOLHIDO"
   rc=$?
   set -e
   detect_quota "$agent" "$d/answer.md" "$rc" || true
@@ -759,6 +802,12 @@ start_run() {
     cat "$d/report.md" >>"$d/log.txt" 2>/dev/null || true
     detect_quota "$agent" "$d/log.txt" "$rc" >/dev/null 2>&1 || true
     detect_poupanca "$agent" "$d/log.txt" >/dev/null 2>&1 || true
+    # O modelo que de fato trabalhou, quando houve queda para a reserva. Sem
+    # isto o meta.json credita a corrida ao modelo que recusou, e a telemetria
+    # conta o custo no lugar errado — que é pior que não contar.
+    local usado
+    usado="$(grep '^\[MODELO-USADO\] ' "$d/log.txt" 2>/dev/null | tail -1 | cut -d' ' -f2-)"
+    [ -n "$usado" ] && json_meta "$d/meta.json" model "$usado"
     json_meta "$d/meta.json" status "$([ "$rc" -eq 0 ] && echo done || echo failed)" exit "$rc"
     # Só quem terminou deixa recado no mural. Execução que quebrou escrevia a
     # própria mensagem de erro lá, e o erro voltava dentro do briefing de todo
@@ -805,7 +854,10 @@ cmd_run() {
       sem_ninguem
     fi
   fi
-  local id; id="$(start_run "$agent" "$DIR" "$prompt" "$TIMEOUT" "$PLACE" "$MODEL" "${ATTACH[@]:-}")"
+  arma_modelo "$agent" "$prompt" "$MODEL"
+  [ -n "$MODELO_ESCOLHIDO" ] && [ -z "$MODEL" ] && \
+    say "${DIM}planopt: $MODELO_ESCOLHIDO${TEAM_MODELOS_RESERVA:+ (+$(printf '%s' "$TEAM_MODELOS_RESERVA" | tr ',' '\n' | grep -c .) de reserva)}${RST}"
+  local id; id="$(start_run "$agent" "$DIR" "$prompt" "$TIMEOUT" "$PLACE" "$MODELO_ESCOLHIDO" "${ATTACH[@]:-}")"
   if [ "$BG" -eq 1 ]; then
     say "${B}$agent${RST} started — collect it with: ${B}team wait $id${RST}"
     printf '%s\n' "$id"; return 0
@@ -840,7 +892,8 @@ cmd_sprint() {
     [ -n "$agent" ] || agent="$(pick_agent "$task")"   # everyone busy: double up
     [ -n "$agent" ] || die "no agent could take: $task"
     used="$used $agent"
-    id="$(start_run "$agent" "$DIR" "$task" "$TIMEOUT" "$PLACE" "$MODEL")"
+    arma_modelo "$agent" "$task" "$MODEL"
+    id="$(start_run "$agent" "$DIR" "$task" "$TIMEOUT" "$PLACE" "$MODELO_ESCOLHIDO")"
     ids+=("$id"); names+=("$agent")
     say "  ${GRN}→${RST} ${B}$agent${RST}: $(printf '%s' "$task" | clip 70)"
   done

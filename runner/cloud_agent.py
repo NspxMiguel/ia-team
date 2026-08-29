@@ -518,6 +518,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base-url", required=True)
     ap.add_argument("--model", required=True)
+    ap.add_argument("--modelos-reserva", default="",
+                    help="lista separada por vírgula: para quando o modelo "
+                         "principal estiver estrangulado no fornecedor")
     ap.add_argument("--key-env", required=True)
     ap.add_argument("--dir", required=True)
     ap.add_argument("--brief", required=True)
@@ -548,6 +551,15 @@ def main():
                 {"role": "user", "content": brief}]
     deadline = time.time() + args.timeout
     nudges = 0
+    # A fila de modelos. O principal na frente, as reservas atrás, sem repetir:
+    # cair de volta no modelo que acabou de recusar seria gastar uma tentativa
+    # para receber o mesmo 429.
+    modelo = args.model
+    reserva = []
+    for candidato in (args.modelos_reserva or "").split(","):
+        candidato = candidato.strip()
+        if candidato and candidato != modelo and candidato not in reserva:
+            reserva.append(candidato)
     seen_calls = {}     # the same call, over and over, means the model is stuck
     wrote_something = False
     keep = args.keep
@@ -568,10 +580,26 @@ def main():
         data = None
         for attempt in range(6):
             try:
-                data = call_api(args.base_url, key, args.model, messages, tools,
+                data = call_api(args.base_url, key, modelo, messages, tools,
                                 args.http_timeout, args.temperature)
                 break
             except QuotaExhausted as exc:
+                # Antes de esperar ou desistir, tentar o próximo modelo da fila.
+                #
+                # No plano gratuito o estrangulamento é do modelo, não da conta:
+                # o vizinho responde na hora. Esperar dezesseis segundos por um
+                # modelo específico quando outro está livre é escolher a fila
+                # mais longa de propósito — e foi o que derrubou a primeira
+                # corrida de verdade que este caminho fez.
+                if reserva:
+                    anterior, modelo = modelo, reserva.pop(0)
+                    log("[team] %s estrangulado — seguindo com %s"
+                        % (anterior, modelo))
+                    # Quem de fato trabalhou tem que ficar registrado: senão o
+                    # meta.json credita a corrida ao modelo que recusou, e a
+                    # telemetria contabiliza custo no lugar errado.
+                    log("[MODELO-USADO] %s" % modelo)
+                    continue
                 wait = exc.retry_after or (2 ** attempt)
                 if exc.hard or attempt == 5 or time.time() + wait > deadline:
                     log("[QUOTA] %s" % exc)
@@ -579,6 +607,13 @@ def main():
                 log("[team] rate limited, waiting %.1fs and carrying on" % wait)
                 time.sleep(wait)
             except ModelGone as exc:
+                # Modelo aposentado tem a mesma saída: o próximo da fila.
+                if reserva:
+                    anterior, modelo = modelo, reserva.pop(0)
+                    log("[team] %s não existe mais — seguindo com %s"
+                        % (anterior, modelo))
+                    log("[MODELO-USADO] %s" % modelo)
+                    continue
                 log("[MODELO] %s" % exc)
                 return 5
             except TooLarge as exc:

@@ -144,6 +144,29 @@ própria máquina, com roteamento automático (`auto/best-coding`,
 `auto/best-fast`) sobre mais de cem modelos e sem chave nenhuma. É o caminho
 mais barato quando o trabalho é volume.
 
+## Quanto o trabalho merece
+
+Escolher **quem** faz é metade. A outra é **quanto** merece: mudar a cor de um
+botão e refazer uma arquitetura não podem cair no mesmo modelo do mesmo agente.
+
+Quando o [claude-plan-optimizer](https://github.com/NspxMiguel/claude-plan-optimizer)
+está instalado, o `team` consulta a faixa de custo sozinho e não é preciso fazer
+nada: trabalho barato cai em quem não custa nada, trabalho caro vai para a conta
+que não é o plano medido, e a linha `planopt: <modelo>` aparece antes da corrida
+dizendo o que ele escolheu. Sem o planopt instalado, tudo roteia como antes.
+
+Três coisas que isso encosta e vale saber:
+
+- **plano gratuito estrangula por modelo, não por conta.** Cada faixa carrega
+  uma fila de reserva, e o runner troca de modelo no meio da corrida quando o
+  primeiro recusa. Numa corrida real dois modelos recusaram em sequência e o
+  terceiro entregou o patch — sem a fila, aquilo teria virado falha;
+- **o `--model` explícito ganha sempre**, e não leva reserva: quem digitou o
+  nome escolheu aquele;
+- **quem trabalhou é quem fica registrado.** Depois de uma queda, o `meta.json`
+  grava o modelo que de fato respondeu, não o que recusou — senão a telemetria
+  conta o custo no lugar errado.
+
 ## Poupar o Claude quando a janela dele acaba
 
 O Claude Code trabalha em janelas de cinco horas, e bater no teto no meio de uma
