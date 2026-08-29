@@ -195,7 +195,7 @@ check "routing sends ui work to the ui agent" "[ \"\$($TEAM_ISOLATED runs >/dev/
 printf '%s\n' "— quota"
 "$TEAM_ISOLATED" ask limited --dir "$REPO" "anything" >/dev/null 2>&1
 check "rate limit benches the agent"   "$TEAM_ISOLATED quota | grep -q limited"
-check "benched shows as cooldown"      "$TEAM_ISOLATED agents | grep limited | grep -q quota"
+check "benched shows the real reason"  "$TEAM_ISOLATED agents | grep limited | grep -q 'rate limited'"
 check "work is handed to someone else" "$TEAM_ISOLATED run limited --dir $REPO 'x' 2>&1 | grep -q 'handing this to'"
 "$TEAM_ISOLATED" drop "$(ls -1t "$IA_TEAM_HOME/runs" | head -1)" >/dev/null 2>&1
 check "quota can be cleared"           "$TEAM_ISOLATED quota --clear limited && $TEAM_ISOLATED quota | grep -q 'quota left'"
