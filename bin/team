@@ -1243,35 +1243,133 @@ for m in sorted(x.get('id','') for x in dados.get('data', [])): print(' ', m)"
   fi
 }
 
-# team tidy — worktree é barata de criar e cara de esquecer: 84 delas passaram de
-# 1,6 GB na máquina do dono. Some o que já terminou e não tem patch pendente.
+# Build output a teammate leaves behind. Never work worth keeping, and without
+# this list the safety check below would refuse to clean anything at all: one
+# stray node_modules/ is enough to make a worktree look busy. The trailing
+# slash is optional on purpose: a pnpm/bun node_modules is a symlink, and git
+# lists it with no slash at all.
+TIDY_JUNK_RE='(^|/)(node_modules|target|build|dist|out|\.expo|\.next|\.venv|__pycache__|Pods|DerivedData|vendor|\.gradle|\.turbo)(/|$)'
+
+# Does this worktree hold work no saved patch captured? Prints the reason and
+# returns 0 when it does. The saved patch only ever records tracked changes, so
+# a new file is uncollected by definition — that is how six native modules and
+# four test files were found still sitting in worktrees marked "finished".
+worktree_has_uncollected() { # <worktree> [patch]
+  local wt="$1" patch="${2:-}" live novos
+  [ -d "$wt" ] || return 1
+  git -C "$wt" rev-parse --git-dir >/dev/null 2>&1 || return 1
+
+  novos="$(git -C "$wt" ls-files --others --exclude-standard 2>/dev/null \
+            | grep -Ev "$TIDY_JUNK_RE" | head -n 3 | tr '\n' ' ')"
+  if [ -n "${novos// /}" ]; then
+    printf 'arquivo novo que nenhum patch guarda: %s\n' "$novos"
+    return 0
+  fi
+
+  live="$(git -C "$wt" diff HEAD 2>/dev/null)"
+  [ -n "$live" ] || return 1
+  if [ -n "$patch" ] && [ -f "$patch" ] && [ "$live" = "$(cat "$patch")" ]; then
+    return 1
+  fi
+  printf 'a cópia de trabalho diverge do patch salvo\n'
+  return 0
+}
+
+# The repo a worktree belongs to, read from the worktree itself — an orphan
+# worktree has no run to ask.
+worktree_root() { # <worktree>
+  local common
+  common="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+  [ -n "$common" ] || return 1
+  dirname "$common"
+}
+
+# team tidy — worktree é barata de criar e cara de esquecer: 53 delas passaram de
+# 8,6 GB na máquina do dono. Some o que já terminou, tem idade e não guarda
+# trabalho que nenhum patch coletou.
 cmd_tidy() {
-  local horas="${1:-2}" apagados=0 mantidos=0 espaco_antes espaco_depois
-  espaco_antes="$(du -sk "$WT_DIR" 2>/dev/null | cut -f1)"
-  local d status idade agora
-  agora="$(now)"
+  local horas=2 seco=0 forcar=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --seco|--dry-run) seco=1 ;;
+      --forcar|--force) forcar=1 ;;
+      -*) die "tidy: opção desconhecida $1 (use --seco ou --forcar)" ;;
+      *)  horas="$1" ;;
+    esac
+    shift
+  done
+  case "$horas" in ''|*[!0-9]*) die "tidy: a idade mínima em horas precisa ser um número" ;; esac
+  [ -d "$WT_DIR" ] || { say "nenhuma worktree"; return 0; }
+
+  local espaco_antes; espaco_antes="$(du -sk "$WT_DIR" 2>/dev/null | cut -f1)"
+  local agora; agora="$(now)"
+
+  # work path -> run id, so an orphan worktree is simply one with no entry.
+  local mapa; mapa="$(mktemp)"
+  local d work
   for d in $(ls -1 "$RUNS_DIR" 2>/dev/null); do
-    refresh_status "$d" 2>/dev/null || true
-    status="$(json_get "$RUNS_DIR/$d/meta.json" status)"
-    case "$status" in running) mantidos=$((mantidos+1)); continue ;; esac
-    local work; work="$(json_get "$RUNS_DIR/$d/meta.json" work)"
-    [ -n "$work" ] && [ -d "$work" ] || continue
-    idade=$(( (agora - $(stat -f %m "$RUNS_DIR/$d/meta.json" 2>/dev/null || stat -c %Y "$RUNS_DIR/$d/meta.json" 2>/dev/null || echo "$agora")) / 3600 ))
-    if [ "$idade" -lt "$horas" ]; then mantidos=$((mantidos+1)); continue; fi
-    local root branch
-    root="$(json_get "$RUNS_DIR/$d/meta.json" root)"
-    branch="$(json_get "$RUNS_DIR/$d/meta.json" branch)"
-    if [ -n "$root" ] && [ -d "$root" ]; then
-      git -C "$root" worktree remove --force "$work" >/dev/null 2>&1 || rm -rf "$work"
-      [ -n "$branch" ] && git -C "$root" branch -D "$branch" >/dev/null 2>&1 || true
+    [ -f "$RUNS_DIR/$d/meta.json" ] || continue
+    refresh_status "$d" >/dev/null 2>&1 || true
+    work="$(json_get "$RUNS_DIR/$d/meta.json" work)"
+    [ -n "$work" ] && printf '%s\t%s\n' "$work" "$d" >> "$mapa"
+  done
+
+  local apagados=0 mantidos=0 retidos=0 wt nome run status idade ref root branch motivo tam
+  for wt in "$WT_DIR"/*; do
+    [ -d "$wt" ] || continue
+    nome="$(basename "$wt")"
+    run="$(grep -F "$(printf '%s\t' "$wt")" "$mapa" 2>/dev/null | head -1 | cut -f2 || true)"
+
+    if [ -n "$run" ]; then
+      status="$(json_get "$RUNS_DIR/$run/meta.json" status)"
+      if [ "$status" = "running" ]; then
+        mantidos=$((mantidos+1)); continue
+      fi
+      ref="$RUNS_DIR/$run/meta.json"
     else
-      rm -rf "$work"
+      ref="$wt"
+    fi
+
+    idade=$(( (agora - $(stat -f %m "$ref" 2>/dev/null || stat -c %Y "$ref" 2>/dev/null || echo "$agora")) / 3600 ))
+    if [ "$idade" -lt "$horas" ]; then mantidos=$((mantidos+1)); continue; fi
+
+    if [ "$forcar" -eq 0 ] && motivo="$(worktree_has_uncollected "$wt" "${run:+$RUNS_DIR/$run/patch.diff}")"; then
+      tam="$(du -sh "$wt" 2>/dev/null | cut -f1)"
+      say "  ${YEL}retido${RST} $nome ${DIM}($tam)${RST} — $motivo"
+      retidos=$((retidos+1)); continue
+    fi
+
+    if [ "$seco" -eq 1 ]; then
+      tam="$(du -sh "$wt" 2>/dev/null | cut -f1)"
+      say "  ${GRN}apagaria${RST} $nome ${DIM}($tam${run:+, run $run})${RST}"
+      apagados=$((apagados+1)); continue
+    fi
+
+    root=""; branch=""
+    if [ -n "$run" ]; then
+      root="$(json_get "$RUNS_DIR/$run/meta.json" root)"
+      branch="$(json_get "$RUNS_DIR/$run/meta.json" branch)"
+    fi
+    [ -n "$root" ] || root="$(worktree_root "$wt" 2>/dev/null || true)"
+    if [ -n "$root" ] && [ -d "$root" ]; then
+      git -C "$root" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
+      [ -n "$branch" ] && git -C "$root" branch -D "$branch" >/dev/null 2>&1 || true
+      git -C "$root" worktree prune >/dev/null 2>&1 || true
+    else
+      rm -rf "$wt"
     fi
     apagados=$((apagados+1))
   done
-  espaco_depois="$(du -sk "$WT_DIR" 2>/dev/null | cut -f1)"
+  rm -f "$mapa"
+
+  if [ "$seco" -eq 1 ]; then
+    say ""
+    say "${DIM}modo seco: nada foi apagado.${RST} $apagados apagaria, $retidos retidas, $mantidos mantidas"
+    return 0
+  fi
+  local espaco_depois; espaco_depois="$(du -sk "$WT_DIR" 2>/dev/null | cut -f1)"
   local liberado=$(( (${espaco_antes:-0} - ${espaco_depois:-0}) / 1024 ))
-  say "${GRN}$apagados${RST} worktrees removidas, ${DIM}$mantidos mantidas${RST} (o patch continua em runs/, só a cópia de trabalho sai)"
+  say "${GRN}$apagados${RST} worktrees removidas, ${YEL}$retidos${RST} retidas com trabalho não coletado, ${DIM}$mantidos mantidas${RST} (o patch continua em runs/, só a cópia de trabalho sai)"
   say "${liberado} MB liberados"
 }
 
@@ -1301,7 +1399,8 @@ team — run the other AIs as a team, in parallel, and review what they bring ba
   team crosscheck <id> [--by x]    have another agent review a patch
 
   team runs [--todos] | show <id> | diff <id> | apply <id> [--forcar] | drop <id>
-  team tidy [horas]                apaga worktrees de runs terminados (padrão: 2h)
+  team tidy [horas] [--seco]       apaga worktrees de runs terminados (padrão: 2h)
+                                   retém o que tem trabalho não coletado; --seco só lista
   team suggest [--force|--mute]    offer to bring more AIs in (asked once)
   team port [--global]             teach Codex/Gemini/opencode to use the team too
 
@@ -1357,7 +1456,7 @@ main() {
     suggest)     cmd_suggest "$@" ;;
     watch)       cmd_watch "$@" ;;
     poupanca|poupança) cmd_poupanca "$@" ;;
-    tidy)        cmd_tidy "$@" ;;
+    tidy|gc)     cmd_tidy "$@" ;;
     models)      if [ "${1:-}" = "--refresh" ]; then shift; cmd_ferramenta team-models "$@"; else cmd_models "$@"; fi ;;
     telemetry)   cmd_ferramenta team-telemetry "$@" ;;
     port)        cmd_port "$@" ;;

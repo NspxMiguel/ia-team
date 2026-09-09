@@ -277,6 +277,46 @@ PLAIN="$TMP/plain"; mkdir -p "$PLAIN"
 OUT="$("$TEAM_ISOLATED" run fake --dir "$PLAIN" "no repo here" 2>&1)"
 case "$OUT" in *"not a git repo"*|*"no file changes"*) ok "survives outside a repository";; *) bad "survives outside a repository" "$OUT";; esac
 
+printf '%s\n' "— tidy safety"
+# A finished run whose worktree still holds work no patch captured must survive
+# tidy: the old tidy removed it with --force and the work was gone for good.
+TID="$("$TEAM_ISOLATED" run fake --dir "$REPO" "leave work behind" 2>/dev/null | grep -oE 'fake-[0-9-]+' | head -1)"
+WT="$(python3 -c "import json;print(json.load(open('$IA_TEAM_HOME/runs/$TID/meta.json')).get('work',''))" 2>/dev/null)"
+if [ -n "$WT" ] && [ -d "$WT" ]; then
+  ok "worktree de teste criada"
+  printf 'nao coletado\n' > "$WT/inedito.txt"
+  check "--seco não apaga nada"        "$TEAM_ISOLATED tidy 0 --seco && [ -d '$WT' ]"
+  check "--seco anuncia a retenção"    "$TEAM_ISOLATED tidy 0 --seco | grep -q retido"
+  check "tidy retém arquivo novo"      "$TEAM_ISOLATED tidy 0 && [ -d '$WT' ]"
+  rm -f "$WT/inedito.txt"
+  mkdir -p "$WT/node_modules/x"; printf 'lixo\n' > "$WT/node_modules/x/a.js"
+  rm -rf "$WT/node_modules"; ln -s /tmp "$WT/node_modules"
+  check "node_modules symlink não segura a limpeza" "$TEAM_ISOLATED tidy 0 --seco | grep -q apagaria"
+  rm -rf "$WT/node_modules"
+  mkdir -p "$WT/node_modules/x"; printf 'lixo\n' > "$WT/node_modules/x/a.js"
+  check "node_modules não segura a limpeza" "$TEAM_ISOLATED tidy 0 && [ ! -d '$WT' ]"
+else
+  bad "worktree de teste criada" "meta.json sem work ($TID)"
+fi
+
+# Idade mínima: uma worktree recém-criada não sai por engano.
+TID2="$("$TEAM_ISOLATED" run fake --dir "$REPO" "recente" 2>/dev/null | grep -oE 'fake-[0-9-]+' | head -1)"
+WT2="$(python3 -c "import json;print(json.load(open('$IA_TEAM_HOME/runs/$TID2/meta.json')).get('work',''))" 2>/dev/null)"
+check "idade mínima segura a recém-criada" "$TEAM_ISOLATED tidy 24 && [ -d '$WT2' ]"
+check "gc é o mesmo comando que tidy"      "$TEAM_ISOLATED gc 24 --seco"
+check "opção desconhecida é recusada"      "! $TEAM_ISOLATED tidy --zzz"
+check "idade não numérica é recusada"      "! $TEAM_ISOLATED tidy ontem"
+
+# Órfã: worktree sem run nenhum, que o tidy antigo nunca enxergava.
+ORFA="$IA_TEAM_HOME/worktrees/orfa-de-teste"
+git -C "$REPO" worktree add -q -b orfa-de-teste "$ORFA" >/dev/null 2>&1
+if [ -d "$ORFA" ]; then
+  touch -t 202001010000 "$ORFA"
+  check "órfã sem run é removida" "$TEAM_ISOLATED tidy 1 && [ ! -d '$ORFA' ]"
+else
+  bad "órfã sem run é removida" "não consegui criar a worktree órfã"
+fi
+
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 rm -rf "$TMP"
 [ "$FAIL" -eq 0 ]
