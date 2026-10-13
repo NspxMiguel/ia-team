@@ -1,17 +1,11 @@
-# Ponte para o claude-plan-optimizer, quando ele existe nesta máquina.
+# Bridge to the gatekeeper (porteiro), which ships inside the team in
+# lib/porteiro since 2026-10-13 (it was the standalone claude-plan-optimizer).
 #
-# O `team` sabia escolher **quem** faz o trabalho — pelo assunto: design vai
-# para o antigravity, backend para o codex. Não sabia escolher **quanto** o
-# trabalho merece, então mudar uma cor e refazer uma arquitetura pegavam o mesmo
-# modelo do mesmo agente.
-#
-# O planopt responde essa segunda pergunta. Ele é um projeto separado de
-# propósito: quem quiser rodar o `team` sem ele continua rodando igual, e é por
-# isso que todas as funções aqui caem no silêncio quando ele não está instalado.
-# Integração que quebra a ferramenta quando a dependência falta não é opcional.
+# `team` already picked **who** does the work, by subject. The gatekeeper
+# answers **how much** the work deserves, so changing a colour and rewriting an
+# architecture stop landing on the same model. Every function here still falls
+# silent when the gatekeeper is missing: `team` then routes as before.
 
-# The gatekeeper now ships inside the team (lib/porteiro); the standalone
-# planopt package was discontinued on 2026-10-13.
 PLANOPT_BIN="${PLANOPT_BIN:-$TEAM_LIB/porteiro/bin/planopt}"
 
 planopt_existe() {
