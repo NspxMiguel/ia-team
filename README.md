@@ -240,11 +240,3 @@ MIT — see [LICENSE](LICENSE).
 Made by [@NspxMiguel](https://github.com/NspxMiguel) · [nspx.dev](https://www.nspx.dev)
 
 </div>
-
----
-
-## Documentação
-
-Índice completo em [`docs/INDEX.md`](docs/INDEX.md).
-
-_Hub multi-repo: `~/Documents/Documentacao-Repos/INDEX.md` (atualizado 2026-08-31)._
