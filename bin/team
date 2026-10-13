@@ -52,11 +52,11 @@ elif [ -f "$TEAM_HOME/lib/port_install.py" ]; then TEAM_PORT_HELPER="$TEAM_HOME/
 else TEAM_PORT_HELPER="$REPO_ROOT/lib/port_install.py"; fi
 export TEAM_LIB TEAM_HOME TEAM_PORT_HELPER
 
-# A ponte para o claude-plan-optimizer. Ela é opcional de ponta a ponta: sem o
-# planopt instalado toda função dali devolve vazio, e o `team` roteia como antes.
+# The gatekeeper (formerly claude-plan-optimizer) lives in lib/porteiro. If it is
+# missing every function below returns empty and `team` routes as before.
 # shellcheck source=lib/planopt.sh
 [ -f "$TEAM_LIB/planopt.sh" ] && . "$TEAM_LIB/planopt.sh"
-planopt_existe() { command -v "${PLANOPT_BIN:-planopt}" >/dev/null 2>&1; }
+planopt_existe() { [ -x "${PLANOPT_BIN:-$TEAM_LIB/porteiro/bin/planopt}" ]; }
 if ! declare -F planopt_faixa >/dev/null 2>&1; then
   planopt_faixa() { return 0; }
   planopt_modelo() { return 0; }
@@ -1402,6 +1402,8 @@ team — run the other AIs as a team, in parallel, and review what they bring ba
   team tidy [horas] [--seco]       apaga worktrees de runs terminados (padrão: 2h)
                                    retém o que tem trabalho não coletado; --seco só lista
   team suggest [--force|--mute]    offer to bring more AIs in (asked once)
+  team porteiro <args>             the gatekeeper: how much model a task deserves
+  team painel [--watch|--line]     every AI working right now (Claude subagents too)
   team port [--global]             teach Codex/Gemini/opencode to use the team too
 
 Options: --dir <path> --model <slug> --timeout <secs> --file <path> --here --bg
@@ -1460,6 +1462,12 @@ main() {
     models)      if [ "${1:-}" = "--refresh" ]; then shift; cmd_ferramenta team-models "$@"; else cmd_models "$@"; fi ;;
     telemetry)   cmd_ferramenta team-telemetry "$@" ;;
     port)        cmd_port "$@" ;;
+    porteiro|gatekeeper) exec "${PLANOPT_BIN:-$TEAM_LIB/porteiro/bin/planopt}" "$@" ;;
+    painel|dashboard) exec python3 "$TEAM_LIB/painel.py" "$@" ;;
+    statusline)  # Claude Code status line: gatekeeper sensor + who is working
+                 local s w; s="$("${PLANOPT_BIN:-$TEAM_LIB/porteiro/bin/planopt}" statusline 2>/dev/null)"
+                 w="$(python3 "$TEAM_LIB/painel.py" --line 2>/dev/null)"
+                 printf '%s%s\n' "$s" "${w:+ · $w}" ;;
     version|-V|--version) say "team $VERSION" ;;
     help|-h|--help) usage ;;
     *) die "unknown command: $cmd (try: team help)" ;;

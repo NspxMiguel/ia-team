@@ -78,6 +78,9 @@ export TEAM_PROBE_TTL=0
 
 printf '%s\n' "— basics"
 check "doctor runs"                    "$TEAM_ISOLATED doctor"
+check "porteiro ships inside the team"  "$TEAM porteiro classifica --json 'muda a cor do botao' | grep -q trivial"
+check "painel self-check passes"        "$TEAM painel --test | grep -qx ok"
+check "statusline never fails"          "echo '{}' | $TEAM statusline"
 check "roster lists the fake agent"    "$TEAM_ISOLATED agents | grep -q fake"
 check "roster shows a missing agent"   "$TEAM_ISOLATED agents | grep -q broken"
 check "hire explains a missing agent"  "$TEAM_ISOLATED hire broken | grep -q 'cannot be installed'"

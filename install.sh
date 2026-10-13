@@ -62,6 +62,16 @@ fetch bin/team-watch "$TEAM_HOME/bin/team-watch"
 fetch bin/team-models "$TEAM_HOME/bin/team-models"
 fetch bin/team-telemetry "$TEAM_HOME/bin/team-telemetry"
 fetch lib/quota.py "$TEAM_HOME/lib/quota.py"
+fetch lib/painel.py "$TEAM_HOME/lib/painel.py"
+fetch lib/planopt.sh "$TEAM_HOME/lib/planopt.sh"
+
+say "-> the gatekeeper (porteiro)"
+mkdir -p "$TEAM_HOME/lib/porteiro/bin" "$TEAM_HOME/lib/porteiro/planopt"
+fetch lib/porteiro/bin/planopt "$TEAM_HOME/lib/porteiro/bin/planopt"
+chmod +x "$TEAM_HOME/lib/porteiro/bin/planopt"
+for f in __init__.py classificador.py estado.py i18n.py lexico.py mapeamento.py mapeamento.json; do
+  fetch "lib/porteiro/planopt/$f" "$TEAM_HOME/lib/porteiro/planopt/$f"
+done
 
 say "-> the nudge that starts the sprint on its own"
 fetch bin/team-hint "$BIN_DIR/team-hint"

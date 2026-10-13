@@ -149,11 +149,29 @@ mais barato quando o trabalho é volume.
 Escolher **quem** faz é metade. A outra é **quanto** merece: mudar a cor de um
 botão e refazer uma arquitetura não podem cair no mesmo modelo do mesmo agente.
 
-Quando o [claude-plan-optimizer](https://github.com/NspxMiguel/claude-plan-optimizer)
-está instalado, o `team` consulta a faixa de custo sozinho e não é preciso fazer
-nada: trabalho barato cai em quem não custa nada, trabalho caro vai para a conta
-que não é o plano medido, e a linha `planopt: <modelo>` aparece antes da corrida
-dizendo o que ele escolheu. Sem o planopt instalado, tudo roteia como antes.
+O **porteiro** mora dentro do `team` (era o claude-plan-optimizer, absorvido
+em 13/10/2026). Ele classifica o pedido sem chamar modelo nenhum — trivial,
+barata, média, cara — e o `team` usa isso sozinho: trabalho barato cai em quem
+não custa nada, trabalho caro vai para a conta que não é o plano medido, e a
+linha `planopt: <modelo>` aparece antes da corrida dizendo o que escolheu.
+
+```bash
+team porteiro classifica "muda a cor do botão"   # trivial
+team porteiro explica "reescreve o roteamento"   # a faixa e o porquê
+```
+
+O mesmo porteiro é o gancho `UserPromptSubmit` do Claude Code (`team porteiro
+gancho`): a cada pedido ele diz se vale o modelo forte ou se é coisa de Haiku.
+
+## O painel: quem está trabalhando agora
+
+```bash
+team painel            # todo mundo: subagentes do Claude, codex exec, opencode, runs do time
+team painel --watch    # ao vivo, a cada 2 s
+```
+
+A linha de status do Claude Code (`team statusline`) já mostra o resumo —
+`⚙ codex sonnet×2` — sem ninguém precisar perguntar.
 
 Três coisas que isso encosta e vale saber:
 

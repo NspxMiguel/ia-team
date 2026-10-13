@@ -10,7 +10,9 @@
 # isso que todas as funções aqui caem no silêncio quando ele não está instalado.
 # Integração que quebra a ferramenta quando a dependência falta não é opcional.
 
-PLANOPT_BIN="${PLANOPT_BIN:-planopt}"
+# The gatekeeper now ships inside the team (lib/porteiro); the standalone
+# planopt package was discontinued on 2026-10-13.
+PLANOPT_BIN="${PLANOPT_BIN:-$TEAM_LIB/porteiro/bin/planopt}"
 
 planopt_existe() {
   command -v "$PLANOPT_BIN" >/dev/null 2>&1
